@@ -1,7 +1,8 @@
 'use client';
 
-import { useState, useRef, useEffect, useCallback } from 'react';
-import { Search, X, MapPin, Navigation, Building2, Globe2, Landmark } from 'lucide-react';
+import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
+import { Search, X, MapPin, Navigation, Building2, Globe2, Landmark, Network, CornerDownLeft } from 'lucide-react';
+import { classifyAddress } from '@/lib/geo-ip';
 
 /* ═══════════════════════════════════════════════════════════════
    OSIRIS — Enhanced Search / Locate Bar
@@ -21,6 +22,14 @@ interface SearchResult {
 
 interface SearchBarProps {
   onLocate: (lat: number, lng: number, zoom?: number) => void;
+  /**
+   * An IP address or a domain. Handled by the caller, because locating one
+   * means resolving it and then flying the camera there — a place search plus
+   * a lookup, which this component should not own.
+   */
+  onTeleport?: (target: string) => void;
+  /** True while the caller is resolving a target, so the field can say so. */
+  resolving?: boolean;
   alwaysExpanded?: boolean;
   /** Where the map is looking. Results near it rank first, as in Directions. */
   center?: { lat: number; lng: number } | null;
@@ -66,7 +75,7 @@ function formatLabel(displayName: string): { primary: string; secondary: string 
   };
 }
 
-export default function SearchBar({ onLocate, alwaysExpanded = false, center = null }: SearchBarProps) {
+export default function SearchBar({ onLocate, onTeleport, resolving = false, alwaysExpanded = false, center = null }: SearchBarProps) {
   const [open, setOpen] = useState(alwaysExpanded);
   const [value, setValue] = useState('');
   const [results, setResults] = useState<SearchResult[]>([]);
@@ -122,9 +131,22 @@ export default function SearchBar({ onLocate, alwaysExpanded = false, center = n
     return null;
   };
 
+  /* An address with a place on it. Decided as you type, because the field
+     says which kind of query it is holding before you press Enter. */
+  const kind = useMemo(() => classifyAddress(value), [value]);
+
   const handleSearch = useCallback(async (q: string) => {
     setValue(q);
     setSelectedIdx(-1);
+
+    // An address is not a place name: no geocoder can place it, and asking
+    // one is what made IP lookups look broken. The caller resolves it.
+    const shape = classifyAddress(q);
+    if (shape === 'ip' || shape === 'domain') {
+      setResults([]);
+      setLoading(false);
+      return;
+    }
 
     // Direct coordinate input
     const coords = parseCoords(q);
@@ -211,6 +233,13 @@ export default function SearchBar({ onLocate, alwaysExpanded = false, center = n
     }
     if (e.key === 'Enter') {
       e.preventDefault();
+      if (kind === 'ip' || kind === 'domain') {
+        if (value.trim() && onTeleport) {
+          onTeleport(value.trim());
+          if (!alwaysExpanded) setOpen(false);
+        }
+        return;
+      }
       if (selectedIdx >= 0 && selectedIdx < results.length) {
         handleSelect(results[selectedIdx]);
       } else if (results.length > 0) {
@@ -226,7 +255,7 @@ export default function SearchBar({ onLocate, alwaysExpanded = false, center = n
         className="flex items-center gap-1.5 glass-panel-sm px-3 py-2 text-[10px] font-mono tracking-[0.15em] text-[var(--text-muted)] hover:text-[var(--gold-primary)] hover:border-[var(--border-active)] transition-all hover:shadow-[0_0_12px_rgba(212,175,55,0.08)]"
       >
         <Search className="w-3 h-3" />
-        CMD: LOCATE
+        CMD: LOCATE / RESOLVE
       </button>
     );
   }
@@ -237,17 +266,25 @@ export default function SearchBar({ onLocate, alwaysExpanded = false, center = n
         style={{ boxShadow: '0 0 20px rgba(212,175,55,0.05), inset 0 0 20px rgba(0,0,0,0.2)' }}
       >
         <Search className="w-3.5 h-3.5 text-[var(--gold-primary)] flex-shrink-0" />
+        {(kind === 'ip' || kind === 'domain') && (
+          <span
+            className="shrink-0 px-1.5 py-[2px] rounded-[3px] border border-[var(--cyan-primary)]/40 bg-[var(--cyan-primary)]/10 text-[var(--cyan-primary)] font-mono text-[8px] tracking-[0.16em]"
+            title={kind === 'ip' ? 'IP address — resolves to a physical location' : 'Domain — resolves to its host address'}
+          >
+            {kind === 'ip' ? 'IP' : 'DNS'}
+          </span>
+        )}
         <input
           ref={inputRef}
           value={value}
           onChange={(e) => handleSearch(e.target.value)}
           onKeyDown={handleKeyDown}
-          placeholder="SEARCH ADDRESS, CITY, OR COORDINATES..."
-          className="flex-1 bg-transparent text-[11px] text-[var(--text-primary)] font-mono tracking-wider outline-none placeholder:text-[var(--text-muted)]"
+          placeholder="CITY, COORDINATES, IP ADDRESS OR DOMAIN..."
+          className="flex-1 bg-transparent text-[11px] text-[var(--text-primary)] font-mono tracking-wider outline-none placeholder:text-[var(--text-muted)] min-w-0"
           autoComplete="off"
           spellCheck={false}
         />
-        {loading && <div className="w-3 h-3 border border-[var(--gold-primary)] border-t-transparent rounded-full animate-spin" />}
+        {(loading || resolving) && <div className="w-3 h-3 border border-[var(--gold-primary)] border-t-transparent rounded-full animate-spin" />}
         <span className="text-[9px] text-[var(--text-muted)] font-mono opacity-50 hidden md:inline">CTRL+F</span>
         {(value || !alwaysExpanded) && (
           <button onClick={() => {
@@ -258,6 +295,32 @@ export default function SearchBar({ onLocate, alwaysExpanded = false, center = n
           </button>
         )}
       </div>
+
+      {(kind === 'ip' || kind === 'domain') && value.trim() && onTeleport && (
+        <div
+          className="absolute top-full left-0 right-0 mt-1 glass-panel overflow-hidden z-[9999]"
+          style={{ boxShadow: '0 12px 40px rgba(0,0,0,0.6), 0 0 1px rgba(212,175,55,0.2)' }}
+        >
+          <button
+            onClick={() => onTeleport(value.trim())}
+            className="w-full text-left px-3 py-2.5 flex items-center gap-2.5 hover:bg-[var(--hover-accent)] transition-colors"
+          >
+            <Network className="w-3.5 h-3.5 text-[var(--cyan-primary)] shrink-0" />
+            <div className="flex-1 min-w-0">
+              <div className="text-[11px] font-mono text-[var(--text-primary)] truncate">
+                {resolving ? 'RESOLVING' : 'LOCATE'} <span className="text-[var(--cyan-primary)]">{value.trim()}</span>
+              </div>
+              <div className="text-[8.5px] font-mono text-[var(--text-muted)] mt-0.5">
+                {kind === 'ip' ? 'Registry geolocation for this address' : 'Resolve the domain, then place its host'}
+              </div>
+            </div>
+            <CornerDownLeft className="w-3 h-3 text-[var(--text-muted)] shrink-0" />
+          </button>
+          <div className="px-3 py-1.5 border-t border-[var(--border-secondary)] text-[8px] font-mono tracking-wider text-[var(--text-muted)]">
+            CITY-LEVEL ESTIMATE · NOT A STREET ADDRESS
+          </div>
+        </div>
+      )}
 
       {results.length > 0 && (
         <div

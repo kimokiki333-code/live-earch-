@@ -3,12 +3,9 @@
 import { useEffect, useState, useRef, useCallback, useMemo } from 'react';
 import dynamic from 'next/dynamic';
 import { motion, AnimatePresence } from 'framer-motion';
-import { Layers, BarChart3, Newspaper, Search, X, Globe, MapPinned, Route, Radar, Satellite, Moon, ExternalLink, AlertTriangle, Activity, Database, Wifi, Play, Network, Crosshair, Bluetooth, Pentagon, Radio , PenLine } from 'lucide-react';
+import { Layers, Newspaper, Search, X, Globe, MapPinned, Route, Radar, Satellite, Moon, ExternalLink, AlertTriangle, Radio } from 'lucide-react';
 import { type TerrainStatus } from '@/lib/map-terrain';
 import { loadCameraCatalog, mergeCameraCatalog } from '@/lib/camera-catalog';
-import IntelFeed from '@/components/IntelFeed';
-import MarketsPanel from '@/components/MarketsPanel';
-import ScmPanel from '@/components/ScmPanel';
 import SearchBar from '@/components/SearchBar';
 import DirectionsBar, { type RouteResult, type LiveLocation } from '@/components/DirectionsBar';
 import NavigationView from '@/components/NavigationView';
@@ -23,23 +20,14 @@ import ViewPresets from '@/components/ViewPresets';
 import KeyboardShortcuts from '@/components/KeyboardShortcuts';
 import GlobalStatusBar from '@/components/GlobalStatusBar';
 import LiveAlerts from '@/components/LiveAlerts';
-import WorldRemote from '@/components/WorldRemote';
-import ArcGISPanel from '@/components/ArcGISPanel';
 const OsirisMap = dynamic(() => import('@/components/OsirisMap'), { ssr: false });
 const LayerPanel = dynamic(() => import('@/components/LayerPanel'));
 const SpaceCam = dynamic(() => import('@/components/SpaceCam'), { ssr: false });
 const CameraViewer = dynamic(() => import('@/components/CameraViewer'));
 const OsintPanel = dynamic(() => import('@/components/OsintPanel'));
-const DrawingToolbar = dynamic(() => import('@/components/DrawingToolbar'), { ssr: false });
-const DrawHud = dynamic(() => import('@/components/DrawHud'), { ssr: false });
-// The measurement helpers are pure functions — importing them directly keeps
-// them out of the lazy chunk, so a finished polygon can be measured whether or
-// not the toolbar has loaded yet.
-import { toShape, queryRing, type DrawMode, type DrawnShape, type DrawProgress, type DrawResult } from '@/lib/draw';
-import { selectInPolygon } from '@/lib/aoi';
 import { pickLandingCity } from '@/lib/landing-cities';
-import { diffSweep, appendEvents, type WatchBaseline, type WatchEvent } from '@/lib/watch';
-import { STORAGE_KEY, serializeShapes, deserializeShapes, shapesToGeoJSON, downloadFile } from '@/lib/aoi-export';
+import { locateAddress, detectOrigin, type LookupResult } from '@/lib/geo-ip';
+import GeoDossier, { TeleportBanner } from '@/components/GeoDossier';
 const TokenPanel = dynamic(() => import('@/components/TokenPanel'));
 import SupportMenu from '@/components/SupportMenu';
 function useIsMobile() {
@@ -146,7 +134,7 @@ const newsTransform = (d: { news?: unknown[]; sources?: unknown[]; timestamp?: s
 });
 
 /* One version label for the splash and the header, which used to disagree. */
-const APP_VERSION = 'V5.0';
+const APP_VERSION = 'ARGUS GMI v1.0';
 
 /* The splash reports what has actually happened. The last stage waits for
    the map's first finished frame instead of a fixed timer. */
@@ -185,27 +173,33 @@ export default function Dashboard() {
      once the splash has gone. */
   const [homeLocation, setHomeLocation] = useState<{ lat: number; lng: number } | null>(null);
   const autoLocateCancelled = useRef(false);
+  /* The lookup behind that flight, kept so the arrival can be explained:
+     the address, the registry record, and how much it is worth. */
+  const [origin, setOrigin] = useState<LookupResult | null>(null);
+  const [showOrigin, setShowOrigin] = useState(false);
+  /* A searched address — an IP or a domain — and its own dossier. */
+  const [target, setTarget] = useState<LookupResult | null>(null);
+  const [showTarget, setShowTarget] = useState(false);
+  const [resolving, setResolving] = useState(false);
+  /** Handed to the recon console so "scan this address" lands on the right tool. */
+  const [reconSeed, setReconSeed] = useState<{ query: string; tab?: string; seq: number } | null>(null);
+  const [geoPin, setGeoPin] = useState<{
+    lat: number; lng: number; label: string; sub?: string; tone?: 'origin' | 'target'; ts: number;
+  } | null>(null);
+  /* The travel banner: shown only while the camera is crossing the planet. */
+  const [approach, setApproach] = useState<{
+    target: string; from: { lat: number; lng: number } | null; to: { lat: number; lng: number };
+    startedAt: number; duration: number;
+  } | null>(null);
+  const cinematicStarted = useRef(false);
+  const flightTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   const [activeCamera, setActiveCamera] = useState<any>(null);
   const [spaceWeather, setSpaceWeather] = useState<any>(null);
   const [showLayers, setShowLayers] = useState(true);
-  const [showMarkets, setShowMarkets] = useState(false);
   const [showAlerts, setShowAlerts] = useState(false);
   const [showSpaceCam, setShowSpaceCam] = useState(false);
-  const [showScmPanel, setShowScmPanel] = useState(true);
   const [showIntel, setShowIntel] = useState(false);
-  const [showDrawing, setShowDrawing] = useState(false);
-  const [drawMode, setDrawMode] = useState<DrawMode | null>(null);
-  const [drawProgress, setDrawProgress] = useState<DrawProgress | null>(null);
-  const [drawCommand, setDrawCommand] = useState<{ action: 'undo' | 'finish' | 'cancel'; seq: number } | null>(null);
-  const sendDraw = useCallback((action: 'undo' | 'finish' | 'cancel') => {
-    setDrawCommand(c => ({ action, seq: (c?.seq ?? 0) + 1 }));
-  }, []);
-  /** AOIs whose contents are being watched for arrivals and departures. */
-  const [watched, setWatched] = useState<Set<string>>(new Set());
-  const [watchEvents, setWatchEvents] = useState<WatchEvent[]>([]);
-  const watchBaselines = useRef<Record<string, WatchBaseline>>({});
-  const [selectedPolygon, setSelectedPolygon] = useState<string | null>(null);
   const [showDesktopSearch, setShowDesktopSearch] = useState(false);
   const [showDirections, setShowDirections] = useState(false);
   const [activeRoute, setActiveRoute] = useState<
@@ -290,12 +284,16 @@ export default function Dashboard() {
     );
     return () => navigator.geolocation.clearWatch(id);
   }, [navSession]);
-  const [showRemote, setShowRemote] = useState(false);
-  const [showArcGIS, setShowArcGIS] = useState(false);
-  const [arcgisLayers, setArcgisLayers] = useState<Array<{ id: string; title: string; url: string; geojson: any; color: string; visible: boolean; opacity: number }>>([]);
   const [mapCenter, setMapCenter] = useState<{ lat: number; lng: number; bounds?: { west: number; south: number; east: number; north: number } } | null>(null);
+  /* The same centre, readable from callbacks that must not re-create themselves
+     every time the camera moves. */
+  const mapCenterRef = useRef<{ lat: number; lng: number } | null>(null);
+  const handleMapCenter = useCallback((c: { lat: number; lng: number; bounds?: { west: number; south: number; east: number; north: number } }) => {
+    mapCenterRef.current = { lat: c.lat, lng: c.lng };
+    setMapCenter(c);
+  }, []);
   const [isFullscreen, setIsFullscreen] = useState(false);
-  const [mobilePanel, setMobilePanel] = useState<'layers'|'markets'|'intel'|'search'|'recon'|'remote'|null>(null);
+  const [mobilePanel, setMobilePanel] = useState<'layers'|'search'|'recon'|null>(null);
   const [mapProjection, setMapProjection] = useState<'globe'|'mercator'>('globe');
   const [terrainFocus, setTerrainFocus] = useState(0);
   const [terrainStatus, setTerrainStatus] = useState<TerrainStatus>('idle');
@@ -303,8 +301,6 @@ export default function Dashboard() {
   const [mapStyle, setMapStyle] = useState<'dark'|'satellite'>('dark');
   const [sweepData, setSweepData] = useState<any>(null);
   const [scanTargets, setScanTargets] = useState<any[]>([]);
-  const [drawnPolygons, setDrawnPolygons] = useState<DrawnShape[]>([]);
-  const [demoMode, setDemoMode] = useState(false);
   const [osirisTheme, setOsirisTheme] = useState<'core'|'ghost'>('core');
 
   useEffect(() => {
@@ -344,7 +340,9 @@ export default function Dashboard() {
     /* The live preview tiles over the camera dots — see CctvPreviews. */
     cctv_previews: true,
     live_news: true,
-    earthquakes: true,
+    // Natural HAZARD layer group removed from the rail — leave these off so
+    // nothing draws that has no control to switch it back off.
+    earthquakes: false,
     fires: false,
     weather: false,
     radiation: false,
@@ -407,14 +405,182 @@ export default function Dashboard() {
     return () => clearTimeout(t);
   }, [splashStage]);
 
+  const pushFlight = useCallback((flight: {
+    lat: number; lng: number; zoom?: number; duration?: number;
+    pitch?: number; bearing?: number; curve?: number;
+  }) => {
+    setFlyToLocation({ ...flight, ts: Date.now() });
+  }, []);
+
+  const clearFlights = useCallback(() => {
+    flightTimers.current.forEach(clearTimeout);
+    flightTimers.current = [];
+  }, []);
+
+  /**
+   * The arrival.
+   *
+   * One flight from orbit to a city is what the eye reads as a page change:
+   * MapLibre covers the whole distance in a single arc and the ground only
+   * resolves at the very end. Four shorter flights, each ending closer and
+   * steeper than the last, read as descent — the planet turns, the coastline
+   * grows, the city appears, and only then does the pin drop.
+   *
+   * It lands at city scale on purpose: far enough out that no street is
+   * legible, which is also the honest resolution of an IP lookup.
+   */
+  const runArrival = useCallback((dest: { lat: number; lng: number }, label: string, withDossier: boolean) => {
+    clearFlights();
+    const startedAt = Date.now();
+    const total = 8300;
+    /* The map opens on the viewer's side of the globe before it has reported a
+       centre; without this the banner's distance starts from nowhere. */
+    const from = mapCenterRef.current ?? {
+      lat: 20,
+      lng: Math.max(-180, Math.min(180, -new Date().getTimezoneOffset() / 4)),
+    };
+    setApproach({ target: label, from, to: dest, startedAt, duration: total });
+
+    pushFlight({ ...dest, zoom: 2.3, pitch: 0, duration: 2500, curve: 1.9 });
+    flightTimers.current.push(setTimeout(() => {
+      pushFlight({ ...dest, zoom: 5.8, pitch: 22, bearing: -8, duration: 2200, curve: 1.6 });
+    }, 2550));
+    flightTimers.current.push(setTimeout(() => {
+      pushFlight({ ...dest, zoom: 9.4, pitch: 42, bearing: -15, duration: 1900, curve: 1.35 });
+    }, 4800));
+    flightTimers.current.push(setTimeout(() => {
+      pushFlight({ ...dest, zoom: 12.3, pitch: 54, bearing: -21, duration: 1650, curve: 1.15 });
+    }, 6750));
+    flightTimers.current.push(setTimeout(() => {
+      setApproach(null);
+      if (withDossier) setShowOrigin(true);
+    }, 8500));
+
+    return () => clearFlights();
+  }, [clearFlights, pushFlight]);
+
   /* Fly from the globe down to the viewer's city once the splash has gone.
      Starting as it began to fade meant a busy first load (the satellite
      catalogue is ~19k objects) could hold the fade until the camera was
      nearly at street level, and the globe was never seen. */
   useEffect(() => {
-    if (!splashGone || !homeLocation || autoLocateCancelled.current) return;
-    setFlyToLocation({ ...homeLocation, zoom: 8, duration: 3500, ts: Date.now() });
-  }, [splashGone, homeLocation]);
+    if (!splashGone || !homeLocation || cinematicStarted.current) return;
+    cinematicStarted.current = true;
+
+    /* Somebody who has already touched the map does not want the camera
+       taken from them. They get the pin and the card, not the flight. */
+    if (autoLocateCancelled.current) {
+      setGeoPin({
+        ...homeLocation,
+        label: origin?.record?.ip || 'DETECTED ORIGIN',
+        sub: origin?.record ? `${origin.record.city ?? origin.record.country ?? ''} · ${origin.record.confidence}%` : undefined,
+        tone: 'origin',
+        ts: Date.now(),
+      });
+      setShowOrigin(true);
+      return;
+    }
+
+    /* Deliberately not returned as the effect's cleanup: `origin` can arrive a
+       beat after the fallback city, and React would then run that cleanup and
+       cut the descent in half. Unmount is handled by the effect below. */
+    runArrival(homeLocation, origin?.record?.city?.toUpperCase() || 'DETECTED ORIGIN', true);
+    flightTimers.current.push(setTimeout(() => {
+      if (!origin?.record) return;
+      setGeoPin({
+        lat: origin.record.lat,
+        lng: origin.record.lng,
+        label: origin.record.ip,
+        sub: `${[origin.record.city, origin.record.countryCode].filter(Boolean).join(' · ')} · ${origin.record.confidence}%`,
+        tone: 'origin',
+        ts: Date.now(),
+      });
+    }, 7900));
+  }, [splashGone, homeLocation, origin, runArrival]);
+
+  useEffect(() => () => clearFlights(), [clearFlights]);
+
+  /**
+   * Take the camera to a looked-up address.
+   *
+   * The first leg is deliberately wide and flat: at low pitch and a high
+   * curve the whole planet rolls under the camera, which is the difference
+   * between "the map moved" and "the results page loaded". The dive follows
+   * once the target is under the pointer.
+   */
+  const teleport = useCallback(async (raw: string) => {
+    const query = raw.trim();
+    if (!query) return;
+
+    /* Coordinates are not an address lookup; skip the resolver entirely. */
+    const coords = query.match(/^([+-]?\d+\.?\d*)[,\s]+([+-]?\d+\.?\d*)$/);
+    if (coords) {
+      const lat = parseFloat(coords[1]);
+      const lng = parseFloat(coords[2]);
+      if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+        setGeoPin({ lat, lng, label: `${lat.toFixed(3)}, ${lng.toFixed(3)}`, tone: 'target', ts: Date.now() });
+        runArrival({ lat, lng }, 'COORDINATES', false);
+        return;
+      }
+    }
+
+    clearFlights();
+    setResolving(true);
+    setShowOrigin(false);
+    setShowTarget(false);
+
+    const from = mapCenterRef.current ?? {
+      lat: 20,
+      lng: Math.max(-180, Math.min(180, -new Date().getTimezoneOffset() / 4)),
+    };
+    const result = await locateAddress(query);
+    setResolving(false);
+    setTarget(result);
+
+    if (!result.ok || !result.record) {
+      setApproach(null);
+      setGeoPin(null);
+      setShowTarget(true);
+      return;
+    }
+
+    const dest = { lat: result.record.lat, lng: result.record.lng };
+    const total = 5200;
+    const startedAt = Date.now();
+    setApproach({ target: query.length > 26 ? `${query.slice(0, 26)}…` : query, from, to: dest, startedAt, duration: total });
+
+    setGeoPin({
+      lat: dest.lat,
+      lng: dest.lng,
+      label: result.record.ip,
+      sub: `${[result.record.city, result.record.countryCode].filter(Boolean).join(' · ')} · ${result.record.confidence}%`,
+      tone: 'target',
+      ts: Date.now(),
+    });
+
+    pushFlight({ ...dest, zoom: 2.6, pitch: 0, duration: 3000, curve: 2 });
+    flightTimers.current.push(setTimeout(() => {
+      pushFlight({ ...dest, zoom: 8.8, pitch: 38, bearing: -14, duration: 1700, curve: 1.5 });
+    }, 3050));
+    flightTimers.current.push(setTimeout(() => {
+      pushFlight({ ...dest, zoom: 12.2, pitch: 52, bearing: -20, duration: 1450, curve: 1.2 });
+    }, 4800));
+    flightTimers.current.push(setTimeout(() => {
+      setApproach(null);
+      setShowTarget(true);
+    }, 6400));
+  }, [clearFlights, pushFlight, runArrival]);
+
+  /** A shorter version of the same gesture, for a target the recon console
+   *  already resolved — a scan result should not cost an eight-second film. */
+  const flyToTarget = useCallback((lat: number, lng: number, label: string, sub?: string) => {
+    clearFlights();
+    setGeoPin({ lat, lng, label, sub, tone: 'target', ts: Date.now() });
+    pushFlight({ lat, lng, zoom: 3.2, pitch: 0, duration: 2200, curve: 1.8 });
+    flightTimers.current.push(setTimeout(() => {
+      pushFlight({ lat, lng, zoom: 11.4, pitch: 48, bearing: -18, duration: 1800, curve: 1.3 });
+    }, 2250));
+  }, [clearFlights, pushFlight]);
 
   // On mount: restore layers, probe optional feeds, and geolocate by IP
   useEffect(() => {
@@ -457,20 +623,24 @@ export default function Dashboard() {
       const city = pickLandingCity();
       setHomeLocation({ lat: city.lat, lng: city.lng });
     };
-    const geoGiveUp = setTimeout(landSomewhere, 6000);
-    fetch('/api/geo', { signal: geoController.signal })
-      .then(r => r.json())
-      .then(geo => {
-        if (located || geoController.signal.aborted) return;
-        if (geo.status === 'success' &&
-            Number.isFinite(geo.lat) && Number.isFinite(geo.lon) && Math.abs(geo.lat) <= 90 && Math.abs(geo.lon) <= 180) {
-          located = true;
-          setHomeLocation({ lat: geo.lat, lng: geo.lon });
+    /* Nine seconds, not six: the first lookup now goes through the registry
+       providers, and a cold start against a slow one is allowed to finish
+       before the platform settles for a different city. */
+    const geoGiveUp = setTimeout(landSomewhere, 9000);
+    detectOrigin()
+      .then(res => {
+        if (geoController.signal.aborted) return;
+        setOrigin(res);
+        if (res.ok && res.record) {
+          if (!located) {
+            located = true;
+            setHomeLocation({ lat: res.record.lat, lng: res.record.lng });
+          }
         } else {
           landSomewhere();
         }
       })
-      .catch(landSomewhere);
+      .catch(() => { if (!geoController.signal.aborted) landSomewhere(); });
 
     return () => {
       clearTimeout(geoGiveUp);
@@ -511,10 +681,8 @@ export default function Dashboard() {
         else document.documentElement.requestFullscreen();
       }
       if (e.key === 'l') setShowLayers(p => !p);
-      if (e.key === 'm') setShowMarkets(p => !p);
-      if (e.key === 'c') setShowScmPanel(p => !p);
       if (e.key === 'i') setShowIntel(p => !p);
-      if (e.key === 's') { setShowDesktopSearch(p => !p); setShowIntel(false); setShowMarkets(false); setShowAlerts(false); setShowSpaceCam(false); }
+      if (e.key === 's') { setShowDesktopSearch(p => !p); setShowIntel(false); setShowAlerts(false); setShowSpaceCam(false); }
       if (e.key === 'r' && !e.ctrlKey && !e.metaKey) setFlyToLocation({ lat: 20, lng: 0, zoom: 2.5, ts: Date.now() });
       if (e.key === 'g') {
         setActiveLayers(prev => ({ ...prev, terrain_elevation: false, terrain_3d: false }));
@@ -522,7 +690,7 @@ export default function Dashboard() {
       }
       if ((e.ctrlKey || e.metaKey) && e.key === 'f') {
         e.preventDefault();
-        setShowDesktopSearch(true); setShowIntel(false); setShowMarkets(false); setShowAlerts(false); setShowSpaceCam(false);
+        setShowDesktopSearch(true); setShowIntel(false); setShowAlerts(false); setShowSpaceCam(false);
       }
     };
     const fsHandler = () => setIsFullscreen(!!document.fullscreenElement);
@@ -580,73 +748,7 @@ export default function Dashboard() {
     }
   }, []);
 
-  // ── Drawing / AOI ──
-  // OsirisMap already owns the draw interaction and the polygon rendering;
-  // this only turns a finished ring into a measured, named, coloured record.
-  // Restore drawn areas on load. Work that vanishes on refresh is work the
-  // operator will not trust the tool with.
-  useEffect(() => {
-    try {
-      const restored = deserializeShapes(localStorage.getItem(STORAGE_KEY));
-      if (restored.length) setDrawnPolygons(restored);
-    } catch { /* storage unavailable — start empty */ }
-  }, []);
-
-  useEffect(() => {
-    try { localStorage.setItem(STORAGE_KEY, serializeShapes(drawnPolygons)); } catch { /* quota or private mode */ }
-  }, [drawnPolygons]);
-
-  // ── Tripwires ──
-  // Re-sweep every watched AOI whenever live data refreshes and record what
-  // changed. Keyed off dataVersion rather than `data` so this runs once per
-  // refresh instead of once per render.
-  useEffect(() => {
-    if (watched.size === 0) return;
-    const now = Date.now();
-    const fresh: WatchEvent[] = [];
-    for (const shape of drawnPolygons) {
-      if (!watched.has(shape.id)) continue;
-      const ring = queryRing(shape);
-      if (!ring) continue;
-      const report = selectInPolygon(ring, dataRef.current as any);
-      const prev = watchBaselines.current[shape.id] ?? null;
-      const { baseline, events } = diffSweep(shape.id, report, prev, now);
-      watchBaselines.current[shape.id] = baseline;
-      fresh.push(...events);
-    }
-    if (fresh.length) setWatchEvents(log => appendEvents(log, fresh));
-  }, [dataVersion, watched, drawnPolygons]);
-
-  const toggleWatch = useCallback((id: string) => {
-    setWatched(prev => {
-      const next = new Set(prev);
-      if (next.has(id)) {
-        next.delete(id);
-        // Drop the baseline too, so re-arming starts clean rather than
-        // reporting everything that moved while the watch was off.
-        delete watchBaselines.current[id];
-      } else {
-        next.add(id);
-      }
-      return next;
-    });
-  }, []);
-
-  const handleDrawComplete = useCallback((result: DrawResult) => {
-    setDrawnPolygons(prev => [toShape(result, prev, prev.length), ...prev]);
-    // One shape per arming: staying armed after a finish is how you end up
-    // with an accidental second AOI from the click that dismisses the first.
-    setDrawMode(null);
-    setDrawProgress(null);
-  }, []);
-
-  const handleExportGeoJSON = useCallback(() => {
-    downloadFile(
-      `osiris-aoi-${new Date().toISOString().slice(0, 10)}.geojson`,
-      JSON.stringify(shapesToGeoJSON(drawnPolygons), null, 2),
-      'application/geo+json',
-    );
-  }, [drawnPolygons]);
+  // Drawing / AOI removed — clean GMI maps
 
   // ── SHARED FETCH UTILITY (Fixes #107 — single definition, not 3 copies) ──
   /* `skipWhenHidden` is for background polling only — skipping a *user-initiated*
@@ -1067,11 +1169,7 @@ export default function Dashboard() {
             className="absolute inset-0 z-[999] flex flex-col items-center justify-center overflow-hidden"
             style={{ background: 'radial-gradient(ellipse at center, #0a0a14 0%, var(--bg-void) 70%)' }}
           >
-            {/* ── Scanline CRT overlay ── */}
-            <div className="absolute inset-0 pointer-events-none z-[1]" style={{
-              backgroundImage: 'repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(212,175,55,0.015) 2px, rgba(212,175,55,0.015) 4px)',
-              animation: 'splashScanDrift 8s linear infinite',
-            }} />
+
 
             {/* ── Version badge — top-left ── */}
             <motion.div
@@ -1151,23 +1249,25 @@ export default function Dashboard() {
               />
             </div>
 
-            {/* ── OSIRIS title — letter-by-letter stagger ── */}
-            <div className="flex items-center gap-[2px] mb-3 z-[2]">
-              {'OSIRIS'.split('').map((letter, i) => (
-                <motion.span
-                  key={i}
-                  initial={{ opacity: 0, y: 20, filter: 'blur(8px)' }}
-                  animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
-                  transition={{ delay: 0.5 + i * 0.08, duration: 0.5, ease: 'easeOut' }}
-                  className="text-4xl md:text-5xl font-bold tracking-[0.5em] font-mono"
-                  style={{ color: 'var(--text-heading)', textShadow: '0 0 30px rgba(212,175,55,0.2)' }}
-                >
-                  {letter}
-                </motion.span>
-              ))}
+            {/* ── ARGUS title — clean successor, no camera framing ── */}
+            <div className="flex flex-col items-center gap-1 mb-3 z-[2]">
+              <div className="flex items-center gap-[2px]">
+                {'ARGUS'.split('').map((letter, i) => (
+                  <motion.span
+                    key={i}
+                    initial={{ opacity: 0, y: 20, filter: 'blur(8px)' }}
+                    animate={{ opacity: 1, y: 0, filter: 'blur(0px)' }}
+                    transition={{ delay: 0.5 + i * 0.08, duration: 0.5, ease: 'easeOut' }}
+                    className="text-4xl md:text-5xl font-bold tracking-[0.5em] font-mono"
+                    style={{ color: 'var(--text-heading)', textShadow: '0 0 30px rgba(212,175,55,0.2)' }}
+                  >
+                    {letter}
+                  </motion.span>
+                ))}
+              </div>
+              <motion.span initial={{ opacity: 0 }} animate={{ opacity: 0.7 }} transition={{ delay: 1.0, duration: 0.5 }} className="text-[10px] font-mono tracking-[0.35em] text-[var(--cyan-primary)]">GMI</motion.span>
             </div>
 
-            {/* ── Subtitle — typewriter reveal ── */}
             <div className="overflow-hidden mb-8 z-[2]">
               <motion.div
                 initial={{ width: 0 }}
@@ -1176,7 +1276,7 @@ export default function Dashboard() {
                 className="overflow-hidden whitespace-nowrap"
               >
                 <p className="text-[11px] md:text-[10px] font-mono tracking-[0.5em] text-[var(--gold-primary)]" style={{ opacity: 0.8 }}>
-                  GLOBAL INTELLIGENCE PLATFORM
+                  GLOBAL MONITORING & INTELLIGENCE
                 </p>
               </motion.div>
             </div>
@@ -1212,34 +1312,10 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* ── Decorative grid lines ── */}
-            <div className="absolute inset-0 pointer-events-none z-[0]" style={{ opacity: 0.03 }}>
-              <div className="absolute inset-0" style={{
-                backgroundImage: 'linear-gradient(rgba(212,175,55,0.5) 1px, transparent 1px), linear-gradient(90deg, rgba(212,175,55,0.5) 1px, transparent 1px)',
-                backgroundSize: '60px 60px',
-              }} />
-            </div>
-
-            {/* ── Corner frame accents ── */}
-            {[
-              { t: '10px', l: '10px', bw: '2px 0 0 2px' },
-              { t: '10px', r: '10px', bw: '2px 2px 0 0' },
-              { b: '10px', l: '10px', bw: '0 0 2px 2px' },
-              { b: '10px', r: '10px', bw: '0 2px 2px 0' },
-            ].map((pos, i) => (
-              <motion.div
-                key={i}
-                initial={{ opacity: 0 }}
-                animate={{ opacity: 0.3 }}
-                transition={{ delay: 0.8 + i * 0.1, duration: 0.5 }}
-                className="absolute w-8 h-8 z-[2]"
-                style={{ top: pos.t, bottom: pos.b, left: pos.l, right: pos.r, borderWidth: pos.bw, borderStyle: 'solid', borderColor: 'var(--gold-primary)' }}
-              />
-            ))}
 
 
 
-            {/* ── Inline keyframe for scanline drift ── */}
+
 
           </motion.div>
         )}
@@ -1265,13 +1341,12 @@ export default function Dashboard() {
           onViewStateChange={setMapView}
           onReady={() => setMapReady(true)}
           flyToLocation={flyToLocation}
+          geoPin={geoPin}
           alertPinIds={pinnedAlertIds}
           sweepData={sweepData}
           scanTargets={scanTargets}
-          demoMode={demoMode}
           theme={osirisTheme}
-          arcgisLayers={arcgisLayers.filter(l => l.visible).map(l => ({ id: l.id, title: l.title, geojson: l.geojson, color: l.color, opacity: l.opacity }))}
-          onMapCenter={setMapCenter}
+          onMapCenter={handleMapCenter}
           route={activeRoute}
           userLocation={
             navSession && navProgress
@@ -1281,12 +1356,6 @@ export default function Dashboard() {
           followUser={followUser}
           onFollowInterrupt={() => setFollowUser(false)}
           navigating={Boolean(navSession)}
-          drawMode={drawMode}
-          onDrawProgress={setDrawProgress}
-          drawCommand={drawCommand}
-          onDrawCancel={() => { setDrawMode(null); setDrawProgress(null); }}
-          onDrawComplete={handleDrawComplete}
-          drawnPolygons={drawnPolygons}
           aircraftAirports={aircraftAirports}
         />
       </ErrorBoundary>
@@ -1382,7 +1451,7 @@ export default function Dashboard() {
           <ViewSegment layoutId="view-projection" active={mapProjection === 'globe'} onClick={() => setMapProjection('globe')} title="3D Globe" icon={Globe} label="3D" />
           <ViewSegment layoutId="view-projection" active={mapProjection === 'mercator'} onClick={selectFlatMap} title="2D Map" icon={MapPinned} label="2D" />
           <div className="w-px h-5 mx-1 bg-[var(--border-secondary)]" />
-          <ViewSegment layoutId="view-style" active={mapStyle === 'dark'} onClick={() => setMapStyle('dark')} title="Night Mode" icon={Moon} label="MAP" />
+          <ViewSegment layoutId="view-style" active={mapStyle === 'dark'} onClick={() => setMapStyle('dark')} title="Night Mode" icon={Moon} label="NIGHT" />
           <ViewSegment layoutId="view-style" active={mapStyle === 'satellite'} onClick={() => setMapStyle('satellite')} title="Satellite View" icon={Satellite} label="SAT" />
         </div>
 
@@ -1398,19 +1467,15 @@ export default function Dashboard() {
       {/* ── HEADER ── */}
       <motion.div initial={{ opacity: 0, y: -20 }} animate={revealed ? { opacity: 1, y: 0 } : { opacity: 0, y: -20 }} transition={hudIn(0.15)} className={`absolute top-4 z-[200] pointer-events-none flex flex-col`} style={{ left: isMobile ? '24px' : '64px', right: '24px' }}>
         <div className="flex items-center gap-3 w-fit">
-          <svg viewBox="0 0 650 500" className="w-8 h-8 md:w-10 md:h-10 shrink-0 transition-colors duration-500 text-[#D4AF37] drop-shadow-[0_0_8px_rgba(255,215,0,0.5)]" fill="currentColor">
-            <path d="m620.39,364.82c-0.53628-7.2677-1.7767-14.482-5.0286-21.276-9.4786-19.803-33.963-29.34-53.026-19.284-15.333,8.0885-22.563,29.331-13.578,45.149,6.873,12.099,23.072,18.235,35.622,10.228,4.4328-2.828,7.6343-7.2793,8.9938-12.286,1.3595-5.0063,0.68452-10.798-2.9392-15.401-2.2364-2.8407-5.4473-4.7654-9.1114-5.408-3.664-0.64263-8.1708,0.40388-10.875,3.9972-1.7829,2.3692-1.91,4.5449-1.4108,7.1127,0.24961,1.2839,0.78116,2.8399,2.3513,3.9972,1.5702,1.1573,4.2926,1.9424,5.5844,0.58783,1.1069-1.1607-0.67477-3.153-0.73029-4.7559-0.0388-0.83158-0.0772-1.7317,0.26004-2.4745,0.89679-1.1463,1.8493-1.342,3.4682-1.0581,1.6548,0.29023,3.6474,1.4542,4.5851,2.6452v0.0588c2.0224,2.5986,2.3717,5.5943,1.5284,8.6999-0.81645,3.0066-2.8568,5.919-5.4668,7.7006l-0.29391,0.23513c-8.5452,5.4516-18.484,0.70317-23.392-7.9366-6.7162-11.823-1.5113-26.282,10.285-32.505,15.078-7.9537,35.744,1.451,40.36,17.085,4.566,15.464,2.8715,30.938,0.27385,37.511l10.609,0.073c2.5579-12.089,1.9287-15.035,1.9287-22.696z" />
-            <path d="m158.66,157a70.231,70.231,0,0,0,-14.44,42.81,70.235,70.235,0,1,0,140.47,0,70.231,70.231,0,0,0,-14.28,-42.81h-111.75z" />
-            <path d="m140.86,465.53c-6.7333,0-8.7137-5.4462-12.181-25.899-2.4479-14.774-7.1068-28.463-10.502-43.043-3.0219-13.117-5.6425-20.332-9.6694-26.618-6.5526-10.229-6.3011-20.921,0.71691-30.481,6.33-8.6232,6.827-11.121,6.5471-32.901-0.13783-10.725-0.56403-21.286-0.94711-23.468-0.88077-5.0179-4.6148-7.6923-13.904-9.9586-8.4827-2.0695-16.525-2.2933-41.967-1.1681-18.144,0.80245-20.457,0.72323-22.75-0.77901-5.627-3.687-2.9527-8.8405,12.261-23.626,15.69-15.249,23.876-24.688,38.811-44.75,26.839-36.053,30.927-40.83,57.501-49.189,19.575-6.1582,26.691-9.0119,62.031-10.06,24.654-0.7309,38.767,2.5963,45.357,3.3466,25.219,2.8716,66.247,14.877,91.933,26.083,13.581,5.9249,14.042,6.1723,30.115,16.152,11.981,7.4391,18.733,10.459,35.44,15.034,34.886,9.553,56.753,7.7583,92,10.378,9.2579,0.68808,49.298,3.5149,74.5,4.4784,30.689,1.1732,35.835-2.0376,38.423,0.54994,2.0315,2.0315,0.5636,8.1815,0.6024,14.306,0.0237,3.7378-0.18399,7.6642-0.48569,11.602-8.1923-1.424-8.0353-1.3676-26.54-2.9165-1.6808-0.14069-16.718-1.6695-44.5-4.1726-11.867-1.0692-70.326-2.8448-105.5-3.9248-16.997-0.52189-34.357-4.7228-51-1.2347-5.7624,1.2076,2.387-1.1161-16,7.4812-36.313,14.051-55.853,23.79-104.5,32.83-30.774,4.5201-33.208,4.9745-36.376,7.2909-1.7456,1.2764-1.662,1.6171,1.6767,6.8363,3.5642,5.5717,14.275,15.81,29.699,28.389,51.619,43.564,115.05,77.431,162.89,98.598,22.221,9.5122,37.55,14.655,50.108,16.811,61.892,13.654,134.26-9.4938,136.11-56.959,0.0489-1.256,0.49928-6.001-0.1398-12.079-0.44539-4.2357-0.89625-7.3216-2.2932-11.095-3.9795-10.75-12.413-20.407-28.672-21.755-11.746,0.022-20.375,6.1561-23.95,16.17-4.5622,12.78,1.3185,27.071,14.023,29.565,6.6403,1.3038,11.222-0.5256,14.271-4.4679,3.3424-4.3221,3.72-12.026,1.3559-15.634-2.2757-3.4732-7.2459-5.2754-10.824-3.9248-3.6125,1.3636-4.9933,0.36555-0.6538-3.1839,0.38036-0.24867,0.77844-0.4586,1.191-0.63136,6.6675-2.7918,17.127,4.1226,17.913,14.135,0.7119,11.495-7.7045,20.279-19.249,20.94-6.5659,0.37574-14.594-1.9665-20.026-7.8035-13.425-14.428-9.1712-34.885,2.9586-45.762,4.6131-4.1366,7.7535-6.0583,14.065-7.4773,19.37-4.3554,37.69,4.5134,45.528,24.301,3.5645,8.9992,3.7675,16.201,3.8515,23.221,0.70438,58.895-65.742,87.202-131.95,82.517-28.009-2.4123-46.229-6.8095-80.495-20.915-36.58-12.09-143.44-68.32-207.96-120.33-18.846-15.317-30.511-22.813-33.055-21.24-0.61585,0.38062-0.98989,11.992-0.99221,30.802-0.004,28.758-0.1019,30.352-2.0717,33.583-3.2793,5.3791-4.935,17.725-5.9822,44.608-1.6327,41.914-2.675,60.915-3.4439,62.778-1.3963,3.383-7.0306,4.6642-13.289,4.6642zm221.62-252.27c0.41803-2.1707-4.6044-8.6243-11.231-13.08-10.396-6.9893-22.385-11.512-34.092-15.96-71.934-23.518-145.08-20.065-174.03-4.962-10.593,5.1512-14.126,7.777-22.813,15.582-4.1291,3.7102-9.5939,9.7305-12.144,13.379-5.133,7.3428-10.014,13.339-19.014,23.362-9.3026,10.359-14.5,16.774-14.5,17.897,0,1.5721,7.8962,3.1488,17.5,3.5809,81.15,10.292,230.44,14.198,270.32-39.799zm224.18-69.351c-16.558-0.50003-42.467-2.0158-63.5-4.8954-19.525-2.6732-39.047-6.067-58-11.467-17.982-5.123-35.124-12.85-52.5-19.754-7.7243-3.0694-15.32-6.4533-23-9.6318-8.319-3.4429-16.53-7.1723-25-10.224-15.523-5.5928-30.986-11.946-47.239-14.789-41.988-7.3464-85.261-8.7793-127.76-5.4986-23.554,1.8182-46.695,7.7124-69.5,13.878-17.863,4.8293-35.019,11.972-52.5,18.041-5.069,1.761-10.039,6.841-15.177,5.321-5.396-1.6-10.73-7.749-10.317-13.361,0.434-5.884,7.835-9.014,12.753-12.272,16.823-11.146,36.498-17.485,55.661-23.803,19.219-6.3349,38.923-12.127,59.072-14.001,54.326-5.0532,110.09-3.4301,163.5,7.7269,28.29,5.9098,53.945,20.759,81,30.92,31.437,11.806,61.76,27.444,94.5,34.909,33.045,7.534,83.745,9.6292,101.22,9.5911,6.5425-0.0143,6.7685,0.0708,8.3595,3.1475,1.8515,3.5805,3.1256,14.296,1.7926,15.077-1.3395,0.78418-21.593,1.4453-33.376,1.0894z" />
-          </svg>
+          <div className="w-8 h-8 md:w-10 md:h-10 shrink-0 rounded-lg bg-[var(--gold-primary)] flex items-center justify-center font-mono font-bold text-black text-sm tracking-widest shadow-[0_0_12px_rgba(212,175,55,0.4)]">A</div>
           <div className="flex flex-col items-start gap-0.5">
-            <h1 className="text-lg md:text-xl font-bold tracking-[0.4em] text-[#D4AF37] font-mono">OSIRIS</h1>
-            <span className="text-[9px] md:text-[10px] font-mono tracking-[0.2em] opacity-80 uppercase text-[#D4AF37]">OPEN SOURCE INTELLIGENCE</span>
+            <h1 className="text-lg md:text-xl font-bold tracking-[0.35em] text-[var(--gold-primary)] font-mono">ARGUS</h1>
+            <span className="text-[9px] md:text-[10px] font-mono tracking-[0.2em] opacity-80 uppercase text-[var(--cyan-primary)]">GLOBAL MONITORING & INTELLIGENCE</span>
           </div>
         </div>
         <div className="flex items-center gap-3 mt-1.5 pl-[44px] min-w-0 pr-4">
           <span className="text-[9px] md:text-[9px] text-[var(--text-muted)] font-mono tracking-[0.2em] md:tracking-[0.3em] uppercase opacity-40 truncate">
-            REAL-TIME GLOBAL MONITORING <span className="hidden md:inline">· FLIGHTS · MARITIME · SATELLITES · CCTV · WEATHER · CYBER THREATS</span>
+            NEXT-GEN LIVE EARTH <span className="hidden md:inline">· 3D · 2D · SATELLITE · NIGHT · FLIGHTS · MARITIME · SATELLITES · CCTV</span>
           </span>
         </div>
       </motion.div>
@@ -1466,7 +1531,7 @@ export default function Dashboard() {
       {/* ── RIGHT TOOL STRIP (desktop only — mobile uses bottom nav) ── */}
       {!isMobile && <motion.div initial={{ opacity: 0, x: 12 }} animate={revealed ? { opacity: 1, x: 0 } : { opacity: 0, x: 12 }} transition={hudIn(0.3)} className="absolute right-2 top-1/2 -translate-y-1/2 flex flex-col gap-2 z-[250] pointer-events-auto bg-black/40 backdrop-blur-sm p-1 rounded-full border border-white/5">
         <div className="relative group">
-          <button onClick={() => { setShowIntel(!showIntel); setShowMarkets(false); setShowAlerts(false); }} className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-white/50 ${showIntel ? 'bg-[var(--cyan-primary)]/20' : 'hover:bg-white/10'}`} title="OSINT Recon — IP lookup, network sweep, geolocation" aria-label="OSINT Recon" aria-expanded={showIntel}>
+          <button onClick={() => { setShowIntel(!showIntel); setShowAlerts(false); }} className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-white/50 ${showIntel ? 'bg-[var(--cyan-primary)]/20' : 'hover:bg-white/10'}`} title="OSINT Recon — IP lookup, network sweep, geolocation" aria-label="OSINT Recon" aria-expanded={showIntel}>
             <Radar className={`w-4 h-4 ${showIntel ? 'text-[var(--cyan-primary)]' : 'text-white/60'}`} />
             {showIntel && (
               <span
@@ -1479,12 +1544,17 @@ export default function Dashboard() {
           <AnimatePresence>
             {showIntel && (
               <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="absolute right-12 top-1/2 -translate-y-1/2 w-80">
-                <OsintPanel onSweepVisualize={setSweepData} onScanGeolocate={(target, data) => {
+                <OsintPanel seed={reconSeed} onSweepVisualize={setSweepData} onScanGeolocate={(target, data) => {
                   setScanTargets(prev => {
                     const existing = prev.filter(t => t.id !== target);
                     return [{ id: target, timestamp: Date.now(), ...data }, ...existing].slice(0, 10);
                   });
-                  setFlyToLocation({ lat: data.lat, lng: data.lng, ts: Date.now() });
+                  flyToTarget(
+                    data.lat,
+                    data.lng,
+                    String(target),
+                    [data.city, data.country].filter(Boolean).join(' · ') || undefined,
+                  );
                 }} />
               </motion.div>
             )}
@@ -1492,7 +1562,7 @@ export default function Dashboard() {
         </div>
 
         <div className="relative group">
-          <button onClick={() => { setShowIntel(false); setShowAlerts(false); setShowMarkets(false); setShowSpaceCam(v => !v); }} className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-white/50 ${showSpaceCam ? 'bg-[#00E5FF]/20' : 'hover:bg-white/10'}`} title="Live from Space — 24/7 video downlink from the ISS" aria-label="Live from Space" aria-expanded={showSpaceCam}>
+          <button onClick={() => { setShowIntel(false); setShowAlerts(false); setShowSpaceCam(v => !v); }} className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-white/50 ${showSpaceCam ? 'bg-[#00E5FF]/20' : 'hover:bg-white/10'}`} title="Live from Space — 24/7 video downlink from the ISS" aria-label="Live from Space" aria-expanded={showSpaceCam}>
             <Radio className={`w-4 h-4 ${showSpaceCam ? 'text-[#00E5FF]' : 'text-white/60'}`} />
             {showSpaceCam && (
               <span
@@ -1511,28 +1581,10 @@ export default function Dashboard() {
           </AnimatePresence>
         </div>
 
-        <div className="relative group">
-          <button onClick={() => { setShowMarkets(!showMarkets); setShowIntel(false); setShowAlerts(false); setShowSpaceCam(false); }} className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-white/50 ${showMarkets ? 'bg-[var(--gold-primary)]/20' : 'hover:bg-white/10'}`} title="Markets — crypto prices, space weather, global indices" aria-label="Markets" aria-expanded={showMarkets}>
-            <BarChart3 className={`w-4 h-4 ${showMarkets ? 'text-[var(--gold-primary)]' : 'text-white/60'}`} />
-            {showMarkets && (
-              <span
-                aria-hidden="true"
-                className="absolute -right-1 top-1/2 -translate-y-1/2 h-4 w-[2px] rounded-full bg-current text-[var(--gold-primary)]"
-              />
-            )}
-          </button>
-          <span className="absolute right-11 top-1/2 -translate-y-1/2 px-2 py-1 text-[9px] font-mono tracking-wider text-white/80 bg-black/80 backdrop-blur-sm rounded whitespace-nowrap opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity pointer-events-none">MARKETS</span>
-          <AnimatePresence>
-            {showMarkets && (
-              <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="absolute right-12 top-1/2 -translate-y-1/2 w-80">
-                <MarketsPanel data={data} spaceWeather={spaceWeather} />
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
+        
 
         <div className="relative group">
-          <button onClick={() => { setShowAlerts(!showAlerts); setShowIntel(false); setShowMarkets(false); setShowDrawing(false); }} className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-white/50 ${showAlerts ? 'bg-[#FF3D3D]/20' : 'hover:bg-white/10'}`} title="Live Alerts — earthquakes, conflicts, breaking news" aria-label="Live Alerts" aria-expanded={showAlerts}>
+          <button onClick={() => { setShowAlerts(!showAlerts); setShowIntel(false); }} className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-white/50 ${showAlerts ? 'bg-[#FF3D3D]/20' : 'hover:bg-white/10'}`} title="Live Alerts — earthquakes, conflicts, breaking news" aria-label="Live Alerts" aria-expanded={showAlerts}>
             <AlertTriangle className={`w-4 h-4 ${showAlerts ? 'text-[#FF3D3D]' : 'text-white/60'}`} />
             {showAlerts && (
               <span
@@ -1551,21 +1603,10 @@ export default function Dashboard() {
           </AnimatePresence>
         </div>
 
-        <div className="relative group">
-          <button onClick={() => { setShowDrawing(!showDrawing); setShowIntel(false); setShowMarkets(false); setShowAlerts(false); setShowSpaceCam(false); }} className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-white/50 ${showDrawing ? 'bg-[#00E5FF]/20' : 'hover:bg-white/10'}`} title="Draw — measure areas of interest on the map" aria-label="Draw" aria-expanded={showDrawing}>
-            <PenLine className={`w-4 h-4 ${showDrawing ? 'text-[#00E5FF]' : 'text-white/60'}`} />
-            {showDrawing && (
-              <span
-                aria-hidden="true"
-                className="absolute -right-1 top-1/2 -translate-y-1/2 h-4 w-[2px] rounded-full bg-current text-[#00E5FF]"
-              />
-            )}
-          </button>
-          <span className="absolute right-11 top-1/2 -translate-y-1/2 px-2 py-1 text-[9px] font-mono tracking-wider text-white/80 bg-black/80 backdrop-blur-sm rounded whitespace-nowrap opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity pointer-events-none">DRAW</span>
-        </div>
+        
 
         <div className="relative group">
-          <button onClick={() => { setShowDirections(!showDirections); if (showDirections) { setActiveRoute(null); } setShowDesktopSearch(false); setShowIntel(false); setShowMarkets(false); setShowAlerts(false); setShowSpaceCam(false); setShowDrawing(false); }} className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-white/50 ${showDirections ? 'bg-[var(--gold-primary)]/20' : 'hover:bg-white/10'}`} title="Directions — turn-by-turn routing" aria-label="Directions" aria-expanded={showDirections}>
+          <button onClick={() => { setShowDirections(!showDirections); if (showDirections) { setActiveRoute(null); } setShowDesktopSearch(false); setShowIntel(false); setShowAlerts(false); setShowSpaceCam(false); }} className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-white/50 ${showDirections ? 'bg-[var(--gold-primary)]/20' : 'hover:bg-white/10'}`} title="Directions — turn-by-turn routing" aria-label="Directions" aria-expanded={showDirections}>
             <Route className={`w-4 h-4 ${showDirections ? 'text-[var(--gold-primary)]' : 'text-white/60'}`} />
             {showDirections && (
               <span
@@ -1578,7 +1619,7 @@ export default function Dashboard() {
         </div>
 
         <div className="relative group">
-          <button onClick={() => { setShowDesktopSearch(!showDesktopSearch); setShowIntel(false); setShowMarkets(false); setShowAlerts(false); setShowSpaceCam(false); setShowDrawing(false); }} className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-white/50 ${showDesktopSearch ? 'bg-[var(--gold-primary)]/20' : 'hover:bg-white/10'}`} title="Search — find locations, cities, coordinates" aria-label="Search" aria-expanded={showDesktopSearch}>
+          <button onClick={() => { setShowDesktopSearch(!showDesktopSearch); setShowIntel(false); setShowAlerts(false); setShowSpaceCam(false); }} className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-white/50 ${showDesktopSearch ? 'bg-[var(--gold-primary)]/20' : 'hover:bg-white/10'}`} title="Search — find locations, cities, coordinates" aria-label="Search" aria-expanded={showDesktopSearch}>
             <Search className={`w-4 h-4 ${showDesktopSearch ? 'text-[var(--gold-primary)]' : 'text-white/60'}`} />
             {showDesktopSearch && (
               <span
@@ -1591,77 +1632,24 @@ export default function Dashboard() {
           <AnimatePresence>
             {showDesktopSearch && (
               <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="absolute right-12 top-1/2 -translate-y-1/2 w-80">
-                <SearchBar alwaysExpanded center={mapCenter} onLocate={(lat, lng, zoom) => { setFlyToLocation({ lat, lng, zoom, ts: Date.now() }); setShowDesktopSearch(false); }} />
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
-
-        {/* Separator */}
-        <div className="w-4 h-px bg-white/10 mx-auto" />
-
-        {/* ── ARCGIS INTEL ── */}
-        <div className="relative group">
-          <button onClick={() => { setShowArcGIS(!showArcGIS); setShowRemote(false); }} className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-white/50 ${showArcGIS ? 'bg-[var(--gold-primary)]/20' : 'hover:bg-white/10'}`} title="ArcGIS — search & import geospatial intel layers" aria-label="ArcGIS" aria-expanded={showArcGIS}>
-            <Database className={`w-4 h-4 ${showArcGIS ? 'text-[var(--gold-primary)]' : 'text-white/60'}`} />
-            {showArcGIS && (
-              <span
-                aria-hidden="true"
-                className="absolute -right-1 top-1/2 -translate-y-1/2 h-4 w-[2px] rounded-full bg-current text-[var(--gold-primary)]"
-              />
-            )}
-            {arcgisLayers.length > 0 && <span className="absolute -top-0.5 -right-0.5 min-w-[14px] h-[14px] flex items-center justify-center rounded-full bg-[var(--gold-primary)] text-black text-[9px] font-mono font-bold leading-none px-0.5">{arcgisLayers.length}</span>}
-          </button>
-          <span className="absolute right-11 top-1/2 -translate-y-1/2 px-2 py-1 text-[9px] font-mono tracking-wider text-white/80 bg-black/80 backdrop-blur-sm rounded whitespace-nowrap opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity pointer-events-none">ARCGIS</span>
-          <AnimatePresence>
-            {showArcGIS && (
-              <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="absolute right-12 top-1/2 -translate-y-1/2 w-[340px]">
-                <div className="glass-panel p-3 max-h-[70vh] overflow-y-auto styled-scrollbar">
-                  <ArcGISPanel
-                    onImportLayer={(layer) => setArcgisLayers(prev => [...prev.filter(l => l.id !== layer.id), { ...layer, color: layer.color || '#D4AF37', visible: true, opacity: layer.opacity ?? 0.8 }])}
-                    onRemoveLayer={(id) => setArcgisLayers(prev => prev.filter(l => l.id !== id))}
-                    onUpdateLayer={(id, updates) => setArcgisLayers(prev => prev.map(l => l.id === id ? { ...l, ...updates } : l))}
-                    importedLayers={arcgisLayers}
-                    mapBounds={mapCenter?.bounds || null}
-                  />
-                </div>
+                <SearchBar
+                  alwaysExpanded
+                  center={mapCenter}
+                  resolving={resolving}
+                  onTeleport={(t) => { void teleport(t); setShowDesktopSearch(false); }}
+                  onLocate={(lat, lng, zoom) => { setFlyToLocation({ lat, lng, zoom, ts: Date.now() }); setShowDesktopSearch(false); }}
+                />
               </motion.div>
             )}
           </AnimatePresence>
         </div>
 
 
-        {/* Separator */}
-        <div className="w-4 h-px bg-white/10 mx-auto" />
+        
 
-        {/* ── WORLD REMOTE ── */}
-        <div className="relative group">
-          <button onClick={() => { setShowRemote(!showRemote); setShowArcGIS(false); setShowIntel(false); setShowMarkets(false); setShowAlerts(false); setShowSpaceCam(false); setShowDrawing(false); setShowDesktopSearch(false); }} className={`relative w-8 h-8 rounded-full flex items-center justify-center transition-colors focus:outline-none focus-visible:ring-1 focus-visible:ring-white/50 ${showRemote ? 'bg-[var(--cyan-primary)]/20' : 'hover:bg-white/10'}`} title="World Remote — control nearby Bluetooth devices (TVs, speakers, AC)" aria-label="World Remote" aria-expanded={showRemote}>
-            <Bluetooth className={`w-4 h-4 ${showRemote ? 'text-[var(--cyan-primary)]' : 'text-white/60'}`} />
-            {showRemote && (
-              <span
-                aria-hidden="true"
-                className="absolute -right-1 top-1/2 -translate-y-1/2 h-4 w-[2px] rounded-full bg-current text-[var(--cyan-primary)]"
-              />
-            )}
-          </button>
-          <span className="absolute right-11 top-1/2 -translate-y-1/2 px-2 py-1 text-[9px] font-mono tracking-wider text-white/80 bg-black/80 backdrop-blur-sm rounded whitespace-nowrap opacity-0 group-hover:opacity-100 group-focus-within:opacity-100 transition-opacity pointer-events-none">REMOTE</span>
-          <AnimatePresence>
-            {showRemote && (
-              <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="absolute right-12 top-1/2 -translate-y-1/2 w-80">
-                <WorldRemote onClose={() => setShowRemote(false)} onPlaceOnMap={(devs) => {
-                  setScanTargets(prev => {
-                    const ids = new Set(prev.map((t: any) => t.id));
-                    const next = [...prev];
-                    devs.forEach(d => { if (!ids.has(d.id)) next.unshift({ id: d.id, name: d.name, lat: d.lat, lng: d.lng, type: d.type, color: d.color, timestamp: Date.now(), source: 'BLE' }); });
-                    return next.slice(0, 20);
-                  });
-                  if (devs.length > 0) setFlyToLocation({ lat: devs[0].lat, lng: devs[0].lng, ts: Date.now() });
-                }} />
-              </motion.div>
-            )}
-          </AnimatePresence>
-        </div>
+
+
+        
 
 
       </motion.div>}
@@ -1755,6 +1743,65 @@ export default function Dashboard() {
         )}
       </AnimatePresence>
 
+      {/* ── GEOLOCATION DOSSIER ──
+          One card at a time, centred above the bottom rail: either the address
+          the visitor arrived from or the one they looked up. The travel
+          banner takes the same slot while the camera is in motion, so the
+          story reads top to bottom — traverse, arrive, explain. */}
+      <div
+        className="absolute z-[245] pointer-events-none flex justify-center px-3"
+        style={{ left: 0, right: 0, bottom: isMobile ? 86 : 104 }}
+      >
+        <div className="pointer-events-auto flex justify-center">
+          <AnimatePresence mode="wait">
+            {approach ? (
+              <TeleportBanner
+                key="approach"
+                target={approach.target}
+                from={approach.from}
+                to={approach.to}
+                startedAt={approach.startedAt}
+                duration={approach.duration}
+              />
+            ) : showTarget && target ? (
+              <GeoDossier
+                key="target"
+                result={target}
+                variant="target"
+                compact={isMobile}
+                onRecenter={target.record ? () => flyToTarget(
+                  target.record!.lat, target.record!.lng, target.record!.ip,
+                  [target.record!.city, target.record!.countryCode].filter(Boolean).join(' · '),
+                ) : undefined}
+                onScan={(address) => {
+                  setReconSeed({ query: address, tab: 'scanner', seq: Date.now() });
+                  setShowIntel(true);
+                  setShowTarget(false);
+                }}
+                onClose={() => { setShowTarget(false); setGeoPin(null); }}
+              />
+            ) : showOrigin && origin ? (
+              <GeoDossier
+                key="origin"
+                result={origin}
+                variant="origin"
+                compact={isMobile}
+                onRecenter={origin.record ? () => flyToTarget(
+                  origin.record!.lat, origin.record!.lng, origin.record!.ip,
+                  [origin.record!.city, origin.record!.countryCode].filter(Boolean).join(' · '),
+                ) : undefined}
+                onScan={(address) => {
+                  setReconSeed({ query: address, tab: 'scanner', seq: Date.now() });
+                  setShowIntel(true);
+                  setShowOrigin(false);
+                }}
+                onClose={() => setShowOrigin(false)}
+              />
+            ) : null}
+          </AnimatePresence>
+        </div>
+      </div>
+
       {/* ═══ MOBILE UI ═══ */}
       {isMobile && (
         <>
@@ -1763,15 +1810,13 @@ export default function Dashboard() {
             <div className="glass-panel mobile-nav-inner">
               {[
                 { id: 'layers' as const, icon: Layers, label: 'LAYERS' },
-                { id: 'markets' as const, icon: BarChart3, label: 'MARKETS' },
-                { id: 'intel' as const, icon: Newspaper, label: 'INTEL' },
                 { id: 'recon' as const, icon: Radar, label: 'RECON' },
                 { id: 'search' as const, icon: Search, label: 'SEARCH' },
                 // Routing was reachable only from the desktop tool rail, so a
                 // phone could not open it at all. It sits next to SEARCH
                 // because both answer "take me somewhere".
                 { id: 'route' as const, icon: Route, label: 'ROUTE' },
-                { id: 'remote' as const, icon: Bluetooth, label: 'REMOTE' },
+
               ].map(tab => {
                 // Routing opens the planner at the top of the screen rather than
                 // the bottom drawer — it needs the room above the keyboard, and
@@ -1822,7 +1867,7 @@ export default function Dashboard() {
                 <div className="px-3 pb-3">
                   <div className="flex items-center justify-between mb-2">
                     <span className="hud-text text-[10px] text-[var(--text-primary)]">
-                      {mobilePanel === 'layers' ? 'LAYERS & STATS' : mobilePanel === 'markets' ? 'MARKETS & INTEL' : mobilePanel === 'intel' ? 'INTEL FEED' : mobilePanel === 'recon' ? 'OSIRIS RECON' : mobilePanel === 'remote' ? 'WORLD REMOTE' : 'SEARCH'}
+                      {mobilePanel === 'layers' ? 'LAYERS & STATS' : mobilePanel === 'recon' ? 'ARGUS RECON' : 'SEARCH'}
                     </span>
                     <button onClick={() => setMobilePanel(null)} className="text-[var(--text-muted)] p-1"><X className="w-4 h-4" /></button>
                   </div>
@@ -1843,29 +1888,22 @@ export default function Dashboard() {
                       </div>
                     </>
                   )}
-                  {mobilePanel === 'markets' && <MarketsPanel data={data} spaceWeather={spaceWeather} />}
-                  {mobilePanel === 'intel' && <IntelFeed data={data} onLocate={(lat, lng) => { setFlyToLocation({ lat, lng, ts: Date.now() }); setMobilePanel(null); }} />}
+
                   {mobilePanel === 'search' && (
                     <div className="space-y-2">
-                      <SearchBar center={mapCenter} onLocate={(lat, lng, zoom) => { setFlyToLocation({ lat, lng, zoom, ts: Date.now() }); setMobilePanel(null); }} />
+                      <SearchBar
+                        center={mapCenter}
+                        resolving={resolving}
+                        onTeleport={(t) => { void teleport(t); }}
+                        onLocate={(lat, lng, zoom) => { setFlyToLocation({ lat, lng, zoom, ts: Date.now() }); setMobilePanel(null); }}
+                      />
                       <SharePanel mapView={mapView} activeLayers={activeLayers} mouseCoords={null} />
                     </div>
                   )}
                   {mobilePanel === 'recon' && (
                     <div className="space-y-2">
-                      <OsintPanel isOpen={true} onClose={() => setMobilePanel(null)} isMobile={true} onSweepVisualize={setSweepData} />
+                      <OsintPanel seed={reconSeed} isOpen={true} onClose={() => setMobilePanel(null)} isMobile={true} onSweepVisualize={setSweepData} onScanGeolocate={(target, data) => flyToTarget(data.lat, data.lng, String(target), [data.city, data.country].filter(Boolean).join(' · ') || undefined)} />
                     </div>
-                  )}
-                  {mobilePanel === 'remote' && (
-                    <WorldRemote onClose={() => setMobilePanel(null)} onPlaceOnMap={(devs) => {
-                      setScanTargets(prev => {
-                        const ids = new Set(prev.map((t: any) => t.id));
-                        const next = [...prev];
-                        devs.forEach(d => { if (!ids.has(d.id)) next.unshift({ id: d.id, name: d.name, lat: d.lat, lng: d.lng, type: d.type, color: d.color, timestamp: Date.now(), source: 'BLE' }); });
-                        return next.slice(0, 20);
-                      });
-                      if (devs.length > 0) setFlyToLocation({ lat: devs[0].lat, lng: devs[0].lng, ts: Date.now() });
-                    }} />
                   )}
                 </div>
               </motion.div>
@@ -1937,55 +1975,9 @@ export default function Dashboard() {
         onLocate={(lat, lng) => setFlyToLocation({ lat, lng, ts: Date.now() })}
       />
 
-      {/* ── Entity Graph Panel ── */}
-      {/* Guidance belongs over the map, where the clicking happens. */}
-      {drawMode && (
-        <DrawHud
-          mode={drawMode}
-          progress={drawProgress}
-          onUndo={() => sendDraw('undo')}
-          onFinish={() => sendDraw('finish')}
-          onCancel={() => { sendDraw('cancel'); setDrawMode(null); setDrawProgress(null); }}
-        />
-      )}
-
-      {showDrawing && (
-        <div className="absolute right-12 top-1/2 -translate-y-1/2 z-[400] w-80 pointer-events-auto">
-          <DrawingToolbar
-            drawMode={drawMode}
-            onSetDrawMode={setDrawMode}
-            progress={drawProgress}
-            polygons={drawnPolygons}
-            onDeletePolygon={(id) => setDrawnPolygons(p => p.filter(x => x.id !== id))}
-            onClearAll={() => { setDrawnPolygons([]); setSelectedPolygon(null); }}
-            onExportGeoJSON={handleExportGeoJSON}
-            selectedPolygon={selectedPolygon}
-            onSelectPolygon={setSelectedPolygon}
-            onRenamePolygon={(id, name) => setDrawnPolygons(p => p.map(x => x.id === id ? { ...x, name } : x))}
-            data={data}
-            onLocateEntity={(lat, lng) => setFlyToLocation({ lat, lng, zoom: 12, ts: Date.now() })}
-            watched={watched}
-            onToggleWatch={toggleWatch}
-            watchEvents={watchEvents}
-          />
-        </div>
-      )}
-
       {/* ── OVERLAYS ── */}
-      <div className="vignette absolute inset-0 pointer-events-none z-[2]" />
-      <div className="crt-scanlines absolute inset-0 pointer-events-none z-[3] opacity-[0.02]" />
-      {/* Corner frames — using explicit classes for Tailwind JIT compatibility */}
-      {[
-        { pos: 'top-0 left-0', vAnchor: 'top-0', hAnchor: 'left-0', hGrad: 'bg-gradient-to-r', vGrad: 'bg-gradient-to-b' },
-        { pos: 'top-0 right-0', vAnchor: 'top-0', hAnchor: 'right-0', hGrad: 'bg-gradient-to-l', vGrad: 'bg-gradient-to-b' },
-        { pos: 'bottom-0 left-0', vAnchor: 'bottom-0', hAnchor: 'left-0', hGrad: 'bg-gradient-to-r', vGrad: 'bg-gradient-to-t' },
-        { pos: 'bottom-0 right-0', vAnchor: 'bottom-0', hAnchor: 'right-0', hGrad: 'bg-gradient-to-l', vGrad: 'bg-gradient-to-t' },
-      ].map((c, i) => (
-        <div key={i} className={`absolute ${c.pos} w-16 h-16 pointer-events-none z-[1]`}>
-          <div className={`absolute ${c.vAnchor} ${c.hAnchor} w-full h-[1px] ${c.hGrad} from-[var(--gold-primary)]/30 to-transparent`} />
-          <div className={`absolute ${c.vAnchor} ${c.hAnchor} w-[1px] h-full ${c.vGrad} from-[var(--gold-primary)]/30 to-transparent`} />
-        </div>
-      ))}
+      {/* framing removed — clean ARGUS map */}
+      
 
       {/* Keyboard Shortcuts Overlay */}
       <KeyboardShortcuts />
