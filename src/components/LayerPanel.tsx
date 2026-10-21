@@ -4,8 +4,7 @@ import { memo, useEffect, useState } from 'react';
 import { motion, AnimatePresence } from 'framer-motion';
 import {
   Plane, Satellite, Sun, AlertTriangle, Camera,
-  CloudLightning, Ship, Network, Database, Ghost,
-  Flame, Tv, Radio, Mountain, Anchor, Megaphone, SlidersHorizontal
+  Ship, Network, Ghost, Megaphone, SlidersHorizontal
 } from 'lucide-react';
 import StyleStudio from './StyleStudio';
 import { TERRAIN_MIN_ZOOM, type TerrainStatus } from '@/lib/map-terrain';
@@ -98,16 +97,6 @@ const LAYER_GROUPS: LayerGroupDef[] = [
       { key: 'cctv', label: 'CCTV Cameras', dataKey: 'cameras' },
       { key: 'cctv_previews', label: 'Live Previews', dataKey: '', parent: 'cctv' },
       { key: 'live_news', label: 'Live News Feeds', dataKey: 'live_feeds' },
-    ],
-  },
-  {
-    label: 'HAZARD',
-    fullLabel: 'NATURAL HAZARDS',
-    icon: CloudLightning,
-    layers: [
-      { key: 'earthquakes', label: 'Earthquakes', dataKey: 'earthquakes' },
-      { key: 'fires', label: 'Active Fires', dataKey: 'fires' },
-      { key: 'weather', label: 'Severe Weather', dataKey: 'weather_events' },
     ],
   },
   {

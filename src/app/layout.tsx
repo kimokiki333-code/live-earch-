@@ -2,10 +2,10 @@ import type { Metadata, Viewport } from "next";
 import ErrorBoundary from '@/components/ErrorBoundary';
 import "./globals.css";
 
-const SITE_URL = "https://osirisai.live";
-const SITE_NAME = "OSIRIS";
-const SITE_TITLE = "OSIRIS — Open Source Intelligence Platform | Live Flight Tracking, CCTV, OSINT Tools & More";
-const SITE_DESCRIPTION = "The open-source Palantir alternative. Track live aircraft, satellites, and worldwide CCTV cameras on a 3D globe. Run Nmap scans, DNS lookups, WHOIS queries, SSL cert analysis & threat intelligence — all from your browser. 20+ data sources including live earthquake, wildfire, cyber threat and conflict feeds, plus mapped reference data such as nuclear facilities. Free & open source.";
+const SITE_URL = "https://argus-gmi.live";
+const SITE_NAME = "ARGUS";
+const SITE_TITLE = "ARGUS — Global Monitoring & Intelligence | Live 3D/2D Earth, Satellite & Night Maps";
+const SITE_DESCRIPTION = "ARGUS GMI — the next-generation Global Monitoring & Intelligence platform. Real-time 3D globe, 2D map, satellite imagery and night mode with live flight tracking, maritime, satellites, CCTV and cyber intelligence. Clean, framing-free, GPU-accelerated. The successor to OSIRIS.";
 
 export const viewport: Viewport = {
   themeColor: "#D4AF37",
@@ -19,44 +19,20 @@ export const metadata: Metadata = {
   metadataBase: new URL(SITE_URL),
   title: {
     default: SITE_TITLE,
-    template: "%s | OSIRIS Intelligence",
+    template: "%s | ARGUS GMI",
   },
   description: SITE_DESCRIPTION,
   keywords: [
-    // OSINT Tools - Primary focus
-    "OSINT tools", "free OSINT tools", "online OSINT toolkit", "OSINT framework",
-    "nmap online", "nmap scanner online", "free nmap scan", "port scanner online",
-    "DNS lookup tool", "WHOIS lookup", "reverse DNS", "DNS records",
-    "SSL certificate checker", "certificate transparency", "cert lookup",
-    "BGP routing lookup", "ASN lookup", "IP geolocation",
-    "threat intelligence", "threat intel lookup", "IP reputation check",
-    "network reconnaissance", "recon tools", "penetration testing tools",
-    "cybersecurity tools", "infosec tools", "security scanner",
-    "linux OSINT tools", "kali linux tools online", "OSINT browser tools",
-    
-    // Intelligence Platform
-    "OSINT", "open source intelligence", "intelligence platform", "global intelligence",
-    "geospatial intelligence", "GEOINT", "SIGINT", "real-time tracking",
-    "palantir alternative", "open source palantir", "intelligence dashboard",
-    
-    // Tracking & Data
-    "flight tracker", "aircraft tracking", "ADS-B tracker", "live flight radar",
-    "satellite tracking", "ISS tracker", "space station tracker",
-    "CCTV cameras live", "security cameras worldwide", "live cameras",
-    "earthquake monitor", "seismic activity", "USGS earthquake",
-    "wildfire tracker", "NASA FIRMS", "active fires",
-    "nuclear facilities map", "nuclear power plants",
-    "severe weather alerts", "weather radar",
-    "cyber threats dashboard", "CVE tracker",
-    "space weather", "solar storm", "GPS jamming",
-    "defense stocks", "commodities tracker",
-    
-    // Brand
-    "osiris", "osirisai", "osirisai.live",
+    "ARGUS", "ARGUS GMI", "Global Monitoring", "Global Intelligence",
+    "live earth map", "3D globe", "2D map", "satellite view", "night mode",
+    "flight tracker", "ADS-B", "maritime tracker", "satellite tracking",
+    "CCTV live", "earthquake monitor", "cyber threat intel",
+    "OSINT", "geospatial intelligence", "GEOINT", "real-time monitoring",
+    "OSIRIS successor", "live-earth", "argus monitoring",
   ],
-  authors: [{ name: "Osiris Project", url: SITE_URL }],
-  creator: "Osiris Project",
-  publisher: "Osiris Project",
+  authors: [{ name: "ARGUS Project", url: SITE_URL }],
+  creator: "ARGUS Project",
+  publisher: "ARGUS Project",
   robots: {
     index: true,
     follow: true,
@@ -91,8 +67,8 @@ export const metadata: Metadata = {
     canonical: SITE_URL,
   },
   openGraph: {
-    title: "OSIRIS — The Open-Source Palantir Alternative | Live Flights, CCTV, Satellites & OSINT Tools",
-    description: "Track 10K+ aircraft, 2K satellites & worldwide CCTV on a 3D globe. Run Nmap, DNS, WHOIS & threat intel scans from your browser. 20+ live intelligence feeds. Free. Open source.",
+    title: "ARGUS — Global Monitoring & Intelligence | Next-gen live Earth platform",
+    description: "Live 3D globe, 2D map, satellite & night modes. Track flights, ships, satellites & CCTV worldwide. Clean, fast, framing-free. Successor to OSIRIS.",
     type: "website",
     siteName: SITE_NAME,
     locale: "en_US",
@@ -102,17 +78,17 @@ export const metadata: Metadata = {
         url: `${SITE_URL}/og-image.png`,
         width: 1200,
         height: 630,
-        alt: "OSIRIS — Open Source Intelligence Platform with Live Tracking & OSINT Tools",
+        alt: "ARGUS — Global Monitoring & Intelligence",
         type: "image/png",
       },
     ],
   },
   twitter: {
     card: "summary_large_image",
-    title: "🛰️ OSIRIS — Open Source Palantir Alternative | Live Tracking + OSINT Tools",
-    description: "Track 10K+ flights, satellites & CCTV worldwide. Run Nmap, DNS, WHOIS scans from your browser. 20+ live intel feeds. Free & open source.",
-    creator: "@simplifaisoul",
-    site: "@simplifaisoul",
+    title: "ARGUS — Global Monitoring & Intelligence",
+    description: "Live 3D/2D/SAT/Night Earth. Flights, maritime, satellites, CCTV. The clean successor to OSIRIS.",
+    creator: "@argus_gmi",
+    site: "@argus_gmi",
     images: [`${SITE_URL}/og-image.png`],
   },
   category: "technology",
@@ -120,19 +96,18 @@ export const metadata: Metadata = {
   other: {
     "apple-mobile-web-app-capable": "yes",
     "apple-mobile-web-app-status-bar-style": "black-translucent",
-    "apple-mobile-web-app-title": "OSIRIS",
+    "apple-mobile-web-app-title": "ARGUS",
     "mobile-web-app-capable": "yes",
     "msapplication-TileColor": "#06060C",
     "msapplication-config": "none",
   },
 };
 
-// JSON-LD Structured Data
 const jsonLd = {
   "@context": "https://schema.org",
   "@type": "WebApplication",
-  name: "OSIRIS — OSINT Toolkit & Intelligence Platform",
-  alternateName: ["OSIRIS", "OsirisAI", "Osiris OSINT"],
+  name: "ARGUS — Global Monitoring & Intelligence",
+  alternateName: ["ARGUS", "ARGUS GMI", "Argus Global Monitoring"],
   url: SITE_URL,
   description: SITE_DESCRIPTION,
   applicationCategory: "SecurityApplication",
@@ -145,31 +120,21 @@ const jsonLd = {
     availability: "https://schema.org/InStock",
   },
   featureList: [
-    "Nmap port scanning from the browser — no install required",
-    "DNS record lookup (A, AAAA, MX, NS, TXT, CNAME)",
-    "WHOIS domain registration lookup",
-    "SSL/TLS certificate transparency search",
-    "BGP routing & ASN lookup",
-    "IP geolocation & threat intelligence",
+    "Interactive 3D globe with day/night cycle",
+    "2D map, satellite imagery and night mode",
     "Real-time flight tracking via ADS-B",
     "Satellite tracking (including ISS)",
     "Worldwide CCTV camera monitoring",
-    "Earthquake monitoring (USGS live feed)",
-    "Wildfire detection (NASA FIRMS satellite data)",
-    "Nuclear facility mapping (curated reference list, not a live feed)",
-    "Severe weather alerts & tracking",
-    "Cyber threat & CVE intelligence",
-    "Space weather & solar storm monitoring",
-    "GPS jamming detection",
-    "Defense & commodity market tracking",
-    "SIGINT news aggregation feed",
-    "Interactive 3D globe with day/night cycle",
+    "Maritime vessel & port monitoring",
+    "Cyber threat & malware intelligence",
+    "Nuclear facility reference mapping",
+    "Severe weather & earthquake feeds",
     "Region intelligence dossier reports",
   ],
   screenshot: `${SITE_URL}/og-image.png`,
   author: {
     "@type": "Organization",
-    name: "Osiris Project",
+    name: "ARGUS Project",
     url: SITE_URL,
   },
 };
@@ -190,7 +155,6 @@ export default function RootLayout({
         <link rel="apple-touch-icon" href="/apple-touch-icon.png" />
         <link rel="canonical" href={SITE_URL} />
         
-        {/* JSON-LD Structured Data */}
         <script
           type="application/ld+json"
           dangerouslySetInnerHTML={{ __html: JSON.stringify(jsonLd) }}
@@ -198,7 +162,7 @@ export default function RootLayout({
 
       </head>
       <body className="antialiased">
-        <ErrorBoundary name="OSIRIS Core">
+        <ErrorBoundary name="ARGUS Core">
           {children}
         </ErrorBoundary>
       </body>
