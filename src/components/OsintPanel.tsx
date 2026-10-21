@@ -1437,7 +1437,7 @@ function OsintPanelInner({ isMobile, onSweepVisualize, onScanGeolocate, seed }: 
               className="w-full bg-[var(--bg-primary)]/60 border border-[var(--border-primary)] rounded-lg pl-8 pr-3 py-2.5 text-[10px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)]/40 focus:outline-none transition-colors"
               style={{ borderColor: query ? `${currentTab?.color}40` : undefined }} />
           </div>
-          <button onClick={() => runLookup()} disabled={loading || (!query.trim() && !queue.length)}
+          <button onClick={() => runLookup()} disabled={loading || !query.trim()}
             className="px-4 py-2 rounded-lg text-[11px] font-mono font-bold tracking-wider disabled:opacity-30 transition-all flex items-center justify-center min-w-[70px]"
             style={{ backgroundColor: `${currentTab?.color}20`, border: `1px solid ${currentTab?.color}40`, color: currentTab?.color }}>
             {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'SCAN'}
