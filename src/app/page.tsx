@@ -26,6 +26,8 @@ const SpaceCam = dynamic(() => import('@/components/SpaceCam'), { ssr: false });
 const CameraViewer = dynamic(() => import('@/components/CameraViewer'));
 const OsintPanel = dynamic(() => import('@/components/OsintPanel'));
 import { pickLandingCity } from '@/lib/landing-cities';
+import { locateAddress, detectOrigin, type LookupResult } from '@/lib/geo-ip';
+import GeoDossier, { TeleportBanner } from '@/components/GeoDossier';
 const TokenPanel = dynamic(() => import('@/components/TokenPanel'));
 import SupportMenu from '@/components/SupportMenu';
 function useIsMobile() {
@@ -171,6 +173,26 @@ export default function Dashboard() {
      once the splash has gone. */
   const [homeLocation, setHomeLocation] = useState<{ lat: number; lng: number } | null>(null);
   const autoLocateCancelled = useRef(false);
+  /* The lookup behind that flight, kept so the arrival can be explained:
+     the address, the registry record, and how much it is worth. */
+  const [origin, setOrigin] = useState<LookupResult | null>(null);
+  const [showOrigin, setShowOrigin] = useState(false);
+  /* A searched address — an IP or a domain — and its own dossier. */
+  const [target, setTarget] = useState<LookupResult | null>(null);
+  const [showTarget, setShowTarget] = useState(false);
+  const [resolving, setResolving] = useState(false);
+  /** Handed to the recon console so "scan this address" lands on the right tool. */
+  const [reconSeed, setReconSeed] = useState<{ query: string; tab?: string; seq: number } | null>(null);
+  const [geoPin, setGeoPin] = useState<{
+    lat: number; lng: number; label: string; sub?: string; tone?: 'origin' | 'target'; ts: number;
+  } | null>(null);
+  /* The travel banner: shown only while the camera is crossing the planet. */
+  const [approach, setApproach] = useState<{
+    target: string; from: { lat: number; lng: number } | null; to: { lat: number; lng: number };
+    startedAt: number; duration: number;
+  } | null>(null);
+  const cinematicStarted = useRef(false);
+  const flightTimers = useRef<ReturnType<typeof setTimeout>[]>([]);
 
   const [activeCamera, setActiveCamera] = useState<any>(null);
   const [spaceWeather, setSpaceWeather] = useState<any>(null);
@@ -263,6 +285,13 @@ export default function Dashboard() {
     return () => navigator.geolocation.clearWatch(id);
   }, [navSession]);
   const [mapCenter, setMapCenter] = useState<{ lat: number; lng: number; bounds?: { west: number; south: number; east: number; north: number } } | null>(null);
+  /* The same centre, readable from callbacks that must not re-create themselves
+     every time the camera moves. */
+  const mapCenterRef = useRef<{ lat: number; lng: number } | null>(null);
+  const handleMapCenter = useCallback((c: { lat: number; lng: number; bounds?: { west: number; south: number; east: number; north: number } }) => {
+    mapCenterRef.current = { lat: c.lat, lng: c.lng };
+    setMapCenter(c);
+  }, []);
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [mobilePanel, setMobilePanel] = useState<'layers'|'search'|'recon'|null>(null);
   const [mapProjection, setMapProjection] = useState<'globe'|'mercator'>('globe');
@@ -376,14 +405,182 @@ export default function Dashboard() {
     return () => clearTimeout(t);
   }, [splashStage]);
 
+  const pushFlight = useCallback((flight: {
+    lat: number; lng: number; zoom?: number; duration?: number;
+    pitch?: number; bearing?: number; curve?: number;
+  }) => {
+    setFlyToLocation({ ...flight, ts: Date.now() });
+  }, []);
+
+  const clearFlights = useCallback(() => {
+    flightTimers.current.forEach(clearTimeout);
+    flightTimers.current = [];
+  }, []);
+
+  /**
+   * The arrival.
+   *
+   * One flight from orbit to a city is what the eye reads as a page change:
+   * MapLibre covers the whole distance in a single arc and the ground only
+   * resolves at the very end. Four shorter flights, each ending closer and
+   * steeper than the last, read as descent — the planet turns, the coastline
+   * grows, the city appears, and only then does the pin drop.
+   *
+   * It lands at city scale on purpose: far enough out that no street is
+   * legible, which is also the honest resolution of an IP lookup.
+   */
+  const runArrival = useCallback((dest: { lat: number; lng: number }, label: string, withDossier: boolean) => {
+    clearFlights();
+    const startedAt = Date.now();
+    const total = 8300;
+    /* The map opens on the viewer's side of the globe before it has reported a
+       centre; without this the banner's distance starts from nowhere. */
+    const from = mapCenterRef.current ?? {
+      lat: 20,
+      lng: Math.max(-180, Math.min(180, -new Date().getTimezoneOffset() / 4)),
+    };
+    setApproach({ target: label, from, to: dest, startedAt, duration: total });
+
+    pushFlight({ ...dest, zoom: 2.3, pitch: 0, duration: 2500, curve: 1.9 });
+    flightTimers.current.push(setTimeout(() => {
+      pushFlight({ ...dest, zoom: 5.8, pitch: 22, bearing: -8, duration: 2200, curve: 1.6 });
+    }, 2550));
+    flightTimers.current.push(setTimeout(() => {
+      pushFlight({ ...dest, zoom: 9.4, pitch: 42, bearing: -15, duration: 1900, curve: 1.35 });
+    }, 4800));
+    flightTimers.current.push(setTimeout(() => {
+      pushFlight({ ...dest, zoom: 12.3, pitch: 54, bearing: -21, duration: 1650, curve: 1.15 });
+    }, 6750));
+    flightTimers.current.push(setTimeout(() => {
+      setApproach(null);
+      if (withDossier) setShowOrigin(true);
+    }, 8500));
+
+    return () => clearFlights();
+  }, [clearFlights, pushFlight]);
+
   /* Fly from the globe down to the viewer's city once the splash has gone.
      Starting as it began to fade meant a busy first load (the satellite
      catalogue is ~19k objects) could hold the fade until the camera was
      nearly at street level, and the globe was never seen. */
   useEffect(() => {
-    if (!splashGone || !homeLocation || autoLocateCancelled.current) return;
-    setFlyToLocation({ ...homeLocation, zoom: 8, duration: 3500, ts: Date.now() });
-  }, [splashGone, homeLocation]);
+    if (!splashGone || !homeLocation || cinematicStarted.current) return;
+    cinematicStarted.current = true;
+
+    /* Somebody who has already touched the map does not want the camera
+       taken from them. They get the pin and the card, not the flight. */
+    if (autoLocateCancelled.current) {
+      setGeoPin({
+        ...homeLocation,
+        label: origin?.record?.ip || 'DETECTED ORIGIN',
+        sub: origin?.record ? `${origin.record.city ?? origin.record.country ?? ''} · ${origin.record.confidence}%` : undefined,
+        tone: 'origin',
+        ts: Date.now(),
+      });
+      setShowOrigin(true);
+      return;
+    }
+
+    /* Deliberately not returned as the effect's cleanup: `origin` can arrive a
+       beat after the fallback city, and React would then run that cleanup and
+       cut the descent in half. Unmount is handled by the effect below. */
+    runArrival(homeLocation, origin?.record?.city?.toUpperCase() || 'DETECTED ORIGIN', true);
+    flightTimers.current.push(setTimeout(() => {
+      if (!origin?.record) return;
+      setGeoPin({
+        lat: origin.record.lat,
+        lng: origin.record.lng,
+        label: origin.record.ip,
+        sub: `${[origin.record.city, origin.record.countryCode].filter(Boolean).join(' · ')} · ${origin.record.confidence}%`,
+        tone: 'origin',
+        ts: Date.now(),
+      });
+    }, 7900));
+  }, [splashGone, homeLocation, origin, runArrival]);
+
+  useEffect(() => () => clearFlights(), [clearFlights]);
+
+  /**
+   * Take the camera to a looked-up address.
+   *
+   * The first leg is deliberately wide and flat: at low pitch and a high
+   * curve the whole planet rolls under the camera, which is the difference
+   * between "the map moved" and "the results page loaded". The dive follows
+   * once the target is under the pointer.
+   */
+  const teleport = useCallback(async (raw: string) => {
+    const query = raw.trim();
+    if (!query) return;
+
+    /* Coordinates are not an address lookup; skip the resolver entirely. */
+    const coords = query.match(/^([+-]?\d+\.?\d*)[,\s]+([+-]?\d+\.?\d*)$/);
+    if (coords) {
+      const lat = parseFloat(coords[1]);
+      const lng = parseFloat(coords[2]);
+      if (Math.abs(lat) <= 90 && Math.abs(lng) <= 180) {
+        setGeoPin({ lat, lng, label: `${lat.toFixed(3)}, ${lng.toFixed(3)}`, tone: 'target', ts: Date.now() });
+        runArrival({ lat, lng }, 'COORDINATES', false);
+        return;
+      }
+    }
+
+    clearFlights();
+    setResolving(true);
+    setShowOrigin(false);
+    setShowTarget(false);
+
+    const from = mapCenterRef.current ?? {
+      lat: 20,
+      lng: Math.max(-180, Math.min(180, -new Date().getTimezoneOffset() / 4)),
+    };
+    const result = await locateAddress(query);
+    setResolving(false);
+    setTarget(result);
+
+    if (!result.ok || !result.record) {
+      setApproach(null);
+      setGeoPin(null);
+      setShowTarget(true);
+      return;
+    }
+
+    const dest = { lat: result.record.lat, lng: result.record.lng };
+    const total = 5200;
+    const startedAt = Date.now();
+    setApproach({ target: query.length > 26 ? `${query.slice(0, 26)}…` : query, from, to: dest, startedAt, duration: total });
+
+    setGeoPin({
+      lat: dest.lat,
+      lng: dest.lng,
+      label: result.record.ip,
+      sub: `${[result.record.city, result.record.countryCode].filter(Boolean).join(' · ')} · ${result.record.confidence}%`,
+      tone: 'target',
+      ts: Date.now(),
+    });
+
+    pushFlight({ ...dest, zoom: 2.6, pitch: 0, duration: 3000, curve: 2 });
+    flightTimers.current.push(setTimeout(() => {
+      pushFlight({ ...dest, zoom: 8.8, pitch: 38, bearing: -14, duration: 1700, curve: 1.5 });
+    }, 3050));
+    flightTimers.current.push(setTimeout(() => {
+      pushFlight({ ...dest, zoom: 12.2, pitch: 52, bearing: -20, duration: 1450, curve: 1.2 });
+    }, 4800));
+    flightTimers.current.push(setTimeout(() => {
+      setApproach(null);
+      setShowTarget(true);
+    }, 6400));
+  }, [clearFlights, pushFlight, runArrival]);
+
+  /** A shorter version of the same gesture, for a target the recon console
+   *  already resolved — a scan result should not cost an eight-second film. */
+  const flyToTarget = useCallback((lat: number, lng: number, label: string, sub?: string) => {
+    clearFlights();
+    setGeoPin({ lat, lng, label, sub, tone: 'target', ts: Date.now() });
+    pushFlight({ lat, lng, zoom: 3.2, pitch: 0, duration: 2200, curve: 1.8 });
+    flightTimers.current.push(setTimeout(() => {
+      pushFlight({ lat, lng, zoom: 11.4, pitch: 48, bearing: -18, duration: 1800, curve: 1.3 });
+    }, 2250));
+  }, [clearFlights, pushFlight]);
 
   // On mount: restore layers, probe optional feeds, and geolocate by IP
   useEffect(() => {
@@ -426,20 +623,24 @@ export default function Dashboard() {
       const city = pickLandingCity();
       setHomeLocation({ lat: city.lat, lng: city.lng });
     };
-    const geoGiveUp = setTimeout(landSomewhere, 6000);
-    fetch('/api/geo', { signal: geoController.signal })
-      .then(r => r.json())
-      .then(geo => {
-        if (located || geoController.signal.aborted) return;
-        if (geo.status === 'success' &&
-            Number.isFinite(geo.lat) && Number.isFinite(geo.lon) && Math.abs(geo.lat) <= 90 && Math.abs(geo.lon) <= 180) {
-          located = true;
-          setHomeLocation({ lat: geo.lat, lng: geo.lon });
+    /* Nine seconds, not six: the first lookup now goes through the registry
+       providers, and a cold start against a slow one is allowed to finish
+       before the platform settles for a different city. */
+    const geoGiveUp = setTimeout(landSomewhere, 9000);
+    detectOrigin()
+      .then(res => {
+        if (geoController.signal.aborted) return;
+        setOrigin(res);
+        if (res.ok && res.record) {
+          if (!located) {
+            located = true;
+            setHomeLocation({ lat: res.record.lat, lng: res.record.lng });
+          }
         } else {
           landSomewhere();
         }
       })
-      .catch(landSomewhere);
+      .catch(() => { if (!geoController.signal.aborted) landSomewhere(); });
 
     return () => {
       clearTimeout(geoGiveUp);
@@ -1140,11 +1341,12 @@ export default function Dashboard() {
           onViewStateChange={setMapView}
           onReady={() => setMapReady(true)}
           flyToLocation={flyToLocation}
+          geoPin={geoPin}
           alertPinIds={pinnedAlertIds}
           sweepData={sweepData}
           scanTargets={scanTargets}
           theme={osirisTheme}
-          onMapCenter={setMapCenter}
+          onMapCenter={handleMapCenter}
           route={activeRoute}
           userLocation={
             navSession && navProgress
@@ -1342,12 +1544,17 @@ export default function Dashboard() {
           <AnimatePresence>
             {showIntel && (
               <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="absolute right-12 top-1/2 -translate-y-1/2 w-80">
-                <OsintPanel onSweepVisualize={setSweepData} onScanGeolocate={(target, data) => {
+                <OsintPanel seed={reconSeed} onSweepVisualize={setSweepData} onScanGeolocate={(target, data) => {
                   setScanTargets(prev => {
                     const existing = prev.filter(t => t.id !== target);
                     return [{ id: target, timestamp: Date.now(), ...data }, ...existing].slice(0, 10);
                   });
-                  setFlyToLocation({ lat: data.lat, lng: data.lng, ts: Date.now() });
+                  flyToTarget(
+                    data.lat,
+                    data.lng,
+                    String(target),
+                    [data.city, data.country].filter(Boolean).join(' · ') || undefined,
+                  );
                 }} />
               </motion.div>
             )}
@@ -1425,7 +1632,13 @@ export default function Dashboard() {
           <AnimatePresence>
             {showDesktopSearch && (
               <motion.div initial={{ opacity: 0, x: 20 }} animate={{ opacity: 1, x: 0 }} exit={{ opacity: 0, x: 20 }} className="absolute right-12 top-1/2 -translate-y-1/2 w-80">
-                <SearchBar alwaysExpanded center={mapCenter} onLocate={(lat, lng, zoom) => { setFlyToLocation({ lat, lng, zoom, ts: Date.now() }); setShowDesktopSearch(false); }} />
+                <SearchBar
+                  alwaysExpanded
+                  center={mapCenter}
+                  resolving={resolving}
+                  onTeleport={(t) => { void teleport(t); setShowDesktopSearch(false); }}
+                  onLocate={(lat, lng, zoom) => { setFlyToLocation({ lat, lng, zoom, ts: Date.now() }); setShowDesktopSearch(false); }}
+                />
               </motion.div>
             )}
           </AnimatePresence>
@@ -1530,6 +1743,65 @@ export default function Dashboard() {
         )}
       </AnimatePresence>
 
+      {/* ── GEOLOCATION DOSSIER ──
+          One card at a time, centred above the bottom rail: either the address
+          the visitor arrived from or the one they looked up. The travel
+          banner takes the same slot while the camera is in motion, so the
+          story reads top to bottom — traverse, arrive, explain. */}
+      <div
+        className="absolute z-[245] pointer-events-none flex justify-center px-3"
+        style={{ left: 0, right: 0, bottom: isMobile ? 86 : 104 }}
+      >
+        <div className="pointer-events-auto flex justify-center">
+          <AnimatePresence mode="wait">
+            {approach ? (
+              <TeleportBanner
+                key="approach"
+                target={approach.target}
+                from={approach.from}
+                to={approach.to}
+                startedAt={approach.startedAt}
+                duration={approach.duration}
+              />
+            ) : showTarget && target ? (
+              <GeoDossier
+                key="target"
+                result={target}
+                variant="target"
+                compact={isMobile}
+                onRecenter={target.record ? () => flyToTarget(
+                  target.record!.lat, target.record!.lng, target.record!.ip,
+                  [target.record!.city, target.record!.countryCode].filter(Boolean).join(' · '),
+                ) : undefined}
+                onScan={(address) => {
+                  setReconSeed({ query: address, tab: 'scanner', seq: Date.now() });
+                  setShowIntel(true);
+                  setShowTarget(false);
+                }}
+                onClose={() => { setShowTarget(false); setGeoPin(null); }}
+              />
+            ) : showOrigin && origin ? (
+              <GeoDossier
+                key="origin"
+                result={origin}
+                variant="origin"
+                compact={isMobile}
+                onRecenter={origin.record ? () => flyToTarget(
+                  origin.record!.lat, origin.record!.lng, origin.record!.ip,
+                  [origin.record!.city, origin.record!.countryCode].filter(Boolean).join(' · '),
+                ) : undefined}
+                onScan={(address) => {
+                  setReconSeed({ query: address, tab: 'scanner', seq: Date.now() });
+                  setShowIntel(true);
+                  setShowOrigin(false);
+                }}
+                onClose={() => setShowOrigin(false)}
+              />
+            ) : null}
+          </AnimatePresence>
+        </div>
+      </div>
+
       {/* ═══ MOBILE UI ═══ */}
       {isMobile && (
         <>
@@ -1619,13 +1891,18 @@ export default function Dashboard() {
 
                   {mobilePanel === 'search' && (
                     <div className="space-y-2">
-                      <SearchBar center={mapCenter} onLocate={(lat, lng, zoom) => { setFlyToLocation({ lat, lng, zoom, ts: Date.now() }); setMobilePanel(null); }} />
+                      <SearchBar
+                        center={mapCenter}
+                        resolving={resolving}
+                        onTeleport={(t) => { void teleport(t); }}
+                        onLocate={(lat, lng, zoom) => { setFlyToLocation({ lat, lng, zoom, ts: Date.now() }); setMobilePanel(null); }}
+                      />
                       <SharePanel mapView={mapView} activeLayers={activeLayers} mouseCoords={null} />
                     </div>
                   )}
                   {mobilePanel === 'recon' && (
                     <div className="space-y-2">
-                      <OsintPanel isOpen={true} onClose={() => setMobilePanel(null)} isMobile={true} onSweepVisualize={setSweepData} />
+                      <OsintPanel seed={reconSeed} isOpen={true} onClose={() => setMobilePanel(null)} isMobile={true} onSweepVisualize={setSweepData} onScanGeolocate={(target, data) => flyToTarget(data.lat, data.lng, String(target), [data.city, data.country].filter(Boolean).join(' · ') || undefined)} />
                     </div>
                   )}
                 </div>

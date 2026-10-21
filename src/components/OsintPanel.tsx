@@ -68,9 +68,21 @@ const TABS: ToolDef[] = [
   { id: 'crypto', label: 'CHAIN INTEL', icon: Bitcoin, placeholder: 'BTC, ETH or SOL wallet address', color: '#F7931A', group: 'chain', blurb: 'Wallet forensics and daily brief' },
 ];
 
-interface OsintPanelProps { isOpen?: boolean; onClose?: () => void; isMobile?: boolean; onSweepVisualize?: (data: any) => void; onScanGeolocate?: (target: string, data: any) => void; }
+interface OsintPanelProps {
+  isOpen?: boolean;
+  onClose?: () => void;
+  isMobile?: boolean;
+  onSweepVisualize?: (data: any) => void;
+  onScanGeolocate?: (target: string, data: any) => void;
+  /**
+   * An address handed over from elsewhere on the platform — the geolocation
+   * dossier's "scan this address", for one. `seq` makes the same address
+   * usable twice; without it a second hand-off would be a no-op.
+   */
+  seed?: { query: string; tab?: string; seq: number } | null;
+}
 
-function OsintPanelInner({ isMobile, onSweepVisualize, onScanGeolocate }: OsintPanelProps) {
+function OsintPanelInner({ isMobile, onSweepVisualize, onScanGeolocate, seed }: OsintPanelProps) {
   const [activeTab, setActiveTab] = useState('scanner');
   const [isFullScreen, setIsFullScreen] = useState(false);
   const [query, setQuery] = useState('');
@@ -80,10 +92,24 @@ function OsintPanelInner({ isMobile, onSweepVisualize, onScanGeolocate }: OsintP
   const [scanType, setScanType] = useState('quick');
   const [expanded, setExpanded] = useState(true);
   const [history, setHistory] = useState<{tab:string;query:string;time:string}[]>([]);
+  /* A batch, not a memory test. Every tool you add lands here with its own
+     target spelled out, so eight queued scans read as eight lines you can
+     count instead of eight clicks you have to remember. */
+  const [queue, setQueue] = useState<Array<{ id: string; tab: string; query: string }>>([]);
   const [sweepResult, setSweepResult] = useState<any>(null);
   const [sweepProgress, setSweepProgress] = useState<{ current: number; total: number } | null>(null);
   const [sweepCidr, setSweepCidr] = useState(24);
   const [cveCache, setCveCache] = useState<Record<string, any>>({});
+
+  /* A hand-off from the map: put the address in the box, on the tool that was
+     asked for, and clear whatever the last lookup left on screen. */
+  useEffect(() => {
+    if (!seed?.query) return;
+    if (seed.tab) setActiveTab(seed.tab);
+    setQuery(seed.query);
+    setResults(null);
+    setError('');
+  }, [seed?.seq]);
   // CHAIN INTEL carries two views: the daily brief needs no target, the wallet
   // lookup uses the shared query bar.
   const [chainView, setChainView] = useState<'brief' | 'wallet'>('brief');
@@ -176,19 +202,58 @@ function OsintPanelInner({ isMobile, onSweepVisualize, onScanGeolocate }: OsintP
         });
     };
 
-  const runLookup = useCallback(async () => {
-    if (!query.trim() || loading) return;
+  /* What each module can actually consume. Sending a domain to a port scanner
+     is the commonest way to get an empty result and conclude the tool is
+     broken, so the field says what it wants before you submit. */
+  const EXPECTS: Record<string, 'ip' | 'domain' | 'any'> = {
+    scanner: 'ip', vuln: 'ip', shodan: 'ip', bgp: 'ip', sweep: 'ip',
+    dns: 'domain', whois: 'domain', certs: 'domain', ssl: 'domain',
+    subdomains: 'domain', headers: 'domain', tech: 'domain',
+  };
+
+  const queueHint = (() => {
+    const expects = EXPECTS[activeTab];
+    const q = query.trim();
+    if (!expects || !q) return null;
+    const looksIp = /^\d{1,3}(\.\d{1,3}){3}$/.test(q);
+    const looksDomain = /^[a-z0-9-]+(\.[a-z0-9-]+)+$/i.test(q);
+    if (expects === 'ip' && !looksIp) return 'This module expects an IP address.';
+    if (expects === 'domain' && !looksDomain) return 'This module expects a domain name.';
+    return null;
+  })();
+
+  const enqueue = useCallback(() => {
+    const q = query.trim();
+    if (!q) return;
+    setQueue(prev => {
+      if (prev.some(item => item.tab === activeTab && item.query === q)) return prev;
+      return [...prev, { id: `${activeTab}:${q}:${Date.now()}`, tab: activeTab, query: q }];
+    });
+  }, [query, activeTab]);
+
+
+
+  const queueTargets = new Set(queue.map(item => item.query));
+  const isQueued = queue.some(item => item.tab === activeTab && item.query === query.trim());
+
+  const runLookup = useCallback(async (targetOverride?: string, tabOverride?: string) => {
+    /* Overridable so a queued batch can run tool by tool: state updates are
+       asynchronous, so the second lookup of a batch would otherwise read the
+       first one's tab and quietly rescan the same thing. */
+    const q = (targetOverride ?? query).trim();
+    const t = tabOverride ?? activeTab;
+    if (!q || loading) return;
     setLoading(true); setError(''); setResults(null);
 
     // IP Sweep — separate flow (only for the sweep tab)
-    if (activeTab === 'sweep') {
+    if (t === 'sweep') {
       setSweepResult(null);
       const cidr = sweepCidr;
       const totalHosts = Math.pow(2, 32 - cidr);
       setSweepProgress({ current: 0, total: totalHosts });
       try {
         const t0 = Date.now();
-        const res = await fetch(`/api/osint/sweep?ip=${encodeURIComponent(query)}&cidr=${cidr}`);
+        const res = await fetch(`/api/osint/sweep?ip=${encodeURIComponent(q)}&cidr=${cidr}`);
         if (!res.ok) { const e = await res.json().catch(() => ({})); throw new Error(e.error || `Sweep failed (${res.status})`); }
         const initData = await res.json();
 
@@ -240,7 +305,7 @@ function OsintPanelInner({ isMobile, onSweepVisualize, onScanGeolocate }: OsintP
           sweep_time_ms: Date.now() - t0
         });
         setSweepProgress(null);
-        setHistory(prev => [{ tab: activeTab, query, time: new Date().toLocaleTimeString() }, ...prev.slice(0, 9)]);
+        setHistory(prev => [{ tab: t, query: q, time: new Date().toLocaleTimeString() }, ...prev.slice(0, 9)]);
       } catch (err: any) {
         setError(err.message);
         setSweepProgress(null);
@@ -252,43 +317,43 @@ function OsintPanelInner({ isMobile, onSweepVisualize, onScanGeolocate }: OsintP
 
     try {
       let url = '';
-      switch (activeTab) {
+      switch (t) {
 
-        case 'dns': url = `/api/osint/dns?domain=${encodeURIComponent(query)}`; break;
-        case 'certs': url = `/api/osint/certs?domain=${encodeURIComponent(query)}`; break;
-        case 'whois': url = `/api/osint/whois?domain=${encodeURIComponent(query)}`; break;
-        case 'threats': url = `/api/osint/threats?query=${encodeURIComponent(query)}`; break;
-        case 'bgp': url = `/api/osint/bgp?query=${encodeURIComponent(query)}`; break;
-        case 'mac': url = `/api/osint/mac?mac=${encodeURIComponent(query)}`; break;
-        case 'phone': url = `/api/osint/phone?number=${encodeURIComponent(query)}`; break;
-        case 'leaks': url = `https://api.xposedornot.com/v1/breach-analytics?email=${encodeURIComponent(query)}`; break;
-        case 'crypto': url = `/api/osint/crypto?address=${encodeURIComponent(query)}`; break;
-        case 'username': url = `/api/osint/username?username=${encodeURIComponent(query)}`; break;
-        case 'github': url = `/api/osint/github?user=${encodeURIComponent(query)}`; break;
-        case 'vuln': url = `/api/scanner?target=${encodeURIComponent(query)}&type=vuln`; break;
-        case 'scanner': url = `/api/scanner?target=${encodeURIComponent(query)}&type=${scanType}`; break;
-        case 'headers': url = `/api/scanner?target=${encodeURIComponent(query)}&type=headers`; break;
-        case 'ssl': url = `/api/scanner?target=${encodeURIComponent(query)}&type=ssl`; break;
-        case 'subdomains': url = `/api/scanner?target=${encodeURIComponent(query)}&type=subdomains`; break;
-        case 'tech': url = `/api/scanner?target=${encodeURIComponent(query)}&type=tech`; break;
-        case 'shodan': url = `https://internetdb.shodan.io/${encodeURIComponent(query)}`; break;
+        case 'dns': url = `/api/osint/dns?domain=${encodeURIComponent(q)}`; break;
+        case 'certs': url = `/api/osint/certs?domain=${encodeURIComponent(q)}`; break;
+        case 'whois': url = `/api/osint/whois?domain=${encodeURIComponent(q)}`; break;
+        case 'threats': url = `/api/osint/threats?q=${encodeURIComponent(q)}`; break;
+        case 'bgp': url = `/api/osint/bgp?q=${encodeURIComponent(q)}`; break;
+        case 'mac': url = `/api/osint/mac?mac=${encodeURIComponent(q)}`; break;
+        case 'phone': url = `/api/osint/phone?number=${encodeURIComponent(q)}`; break;
+        case 'leaks': url = `https://api.xposedornot.com/v1/breach-analytics?email=${encodeURIComponent(q)}`; break;
+        case 'crypto': url = `/api/osint/crypto?address=${encodeURIComponent(q)}`; break;
+        case 'username': url = `/api/osint/username?username=${encodeURIComponent(q)}`; break;
+        case 'github': url = `/api/osint/github?user=${encodeURIComponent(q)}`; break;
+        case 'vuln': url = `/api/scanner?target=${encodeURIComponent(q)}&type=vuln`; break;
+        case 'scanner': url = `/api/scanner?target=${encodeURIComponent(q)}&type=${scanType}`; break;
+        case 'headers': url = `/api/scanner?target=${encodeURIComponent(q)}&type=headers`; break;
+        case 'ssl': url = `/api/scanner?target=${encodeURIComponent(q)}&type=ssl`; break;
+        case 'subdomains': url = `/api/scanner?target=${encodeURIComponent(q)}&type=subdomains`; break;
+        case 'tech': url = `/api/scanner?target=${encodeURIComponent(q)}&type=tech`; break;
+        case 'shodan': url = `https://internetdb.shodan.io/${encodeURIComponent(q)}`; break;
       }
-      const res = await fetch(url, activeTab === 'shodan' ? { cache: 'no-store' } : undefined);
-      if (activeTab === 'shodan' && res.status === 404) {
-        setResults({ ip: query, status: 'No Shodan InternetDB records found', ports: [], cpes: [], hostnames: [], tags: [], vulns: [] });
+      const res = await fetch(url, t === 'shodan' ? { cache: 'no-store' } : undefined);
+      if (t === 'shodan' && res.status === 404) {
+        setResults({ ip: q, status: 'No Shodan InternetDB records found', ports: [], cpes: [], hostnames: [], tags: [], vulns: [] });
         setLoading(false);
         return;
       }
-      if (activeTab === 'leaks' && res.status === 404) {
-        setResults({ email: query, breached: false, breaches: [], data_exposed: [] });
-        setHistory(prev => [{ tab: activeTab, query, time: new Date().toLocaleTimeString() }, ...prev.slice(0, 9)]);
+      if (t === 'leaks' && res.status === 404) {
+        setResults({ email: q, breached: false, breaches: [], data_exposed: [] });
+        setHistory(prev => [{ tab: t, query: q, time: new Date().toLocaleTimeString() }, ...prev.slice(0, 9)]);
         setLoading(false);
         return;
       }
       const data = await res.json();
       if (res.ok) {
         let parsedData = data;
-        if (activeTab === 'leaks') {
+        if (t === 'leaks') {
            let breachList: string[] = [];
            const dataExposed = new Set<string>();
            if (data.BreachesSummary && data.BreachesSummary.site) {
@@ -302,7 +367,7 @@ function OsintPanelInner({ isMobile, onSweepVisualize, onScanGeolocate }: OsintP
               });
            }
            parsedData = {
-              email: query,
+              email: q,
               breached: breachList.length > 0,
               breaches: breachList,
               data_exposed: Array.from(dataExposed).sort()
@@ -310,20 +375,20 @@ function OsintPanelInner({ isMobile, onSweepVisualize, onScanGeolocate }: OsintP
         }
 
         setResults(parsedData);
-        setHistory(prev => [{ tab: activeTab, query, time: new Date().toLocaleTimeString() }, ...prev.slice(0, 9)]);
+        setHistory(prev => [{ tab: t, query: q, time: new Date().toLocaleTimeString() }, ...prev.slice(0, 9)]);
         
         // Geolocate the target in the background
-        if (activeTab === 'phone') {
+        if (t === 'phone') {
           if (data.lat && data.lng && onScanGeolocate) {
-             onScanGeolocate(query, { lat: data.lat, lng: data.lng, type: 'phone', region: data.region });
+             onScanGeolocate(q, { lat: data.lat, lng: data.lng, type: 'phone', region: data.region });
           }
-        } else if (activeTab !== 'sweep' && activeTab !== 'vuln' && activeTab !== 'crypto' && activeTab !== 'username' && activeTab !== 'mac' && activeTab !== 'bgp' && activeTab !== 'github' && activeTab !== 'leaks' && activeTab !== 'phone') {
-          fetch(`/api/osint/ip?ip=${encodeURIComponent(query)}`)
+        } else if (t !== 'sweep' && t !== 'vuln' && t !== 'crypto' && t !== 'username' && t !== 'mac' && t !== 'bgp' && t !== 'github' && t !== 'leaks' && t !== 'phone') {
+          fetch(`/api/osint/ip?ip=${encodeURIComponent(q)}`)
             .then(r => r.json())
             .then(locData => {
               if (locData && locData.geo && locData.geo.lat && locData.geo.lon && onScanGeolocate) {
                 // ip-api returns lat/lon, we pass it up
-                onScanGeolocate(query, { lat: locData.geo.lat, lng: locData.geo.lon, ...locData, type: activeTab });
+                onScanGeolocate(q, { lat: locData.geo.lat, lng: locData.geo.lon, ...locData, type: t });
               }
             })
             .catch(() => {});
@@ -333,7 +398,19 @@ function OsintPanelInner({ isMobile, onSweepVisualize, onScanGeolocate }: OsintP
       }
     } catch { setError('Network error'); }
     finally { setLoading(false); }
-  }, [query, activeTab, scanType, loading, sweepCidr]);
+  }, [query, activeTab, scanType, loading, sweepCidr, queue.length]);
+
+  const runQueue = useCallback(async () => {
+    const items = [...queue];
+    if (!items.length) return;
+    setQueue([]);
+    for (const item of items) {
+      setActiveTab(item.tab);
+      setQuery(item.query);
+      await runLookup(item.query, item.tab);
+      await new Promise(resolve => setTimeout(resolve, 260));
+    }
+  }, [queue, runLookup]);
 
   const currentTab = TABS.find(t => t.id === activeTab);
 
@@ -1035,15 +1112,112 @@ function OsintPanelInner({ isMobile, onSweepVisualize, onScanGeolocate }: OsintP
     return renderFallback();
   };
 
-  const renderFallback = () => {
-    if (!results) return null;
+  /* ── Unknown shapes ──────────────────────────────────────────
+     Every module has its own renderer above, but the API is free to add a
+     field tomorrow. Dumping that field as JSON.stringify is what made results
+     read as a terminal; instead the shape decides the treatment — scalars get
+     a labelled row, short lists get chips, lists of records get cards, nested
+     objects get their own section. Nothing is ever truncated silently: a
+     capped list says how many it is holding back. */
+
+  const isPrimitive = (v: unknown) => v === null || ['string', 'number', 'boolean'].includes(typeof v);
+  const prettyKey = (k: string) => k.replace(/_/g, ' ').replace(/([a-z])([A-Z])/g, '$1 $2');
+  const prettyValue = (v: unknown): string => {
+    if (typeof v === 'boolean') return v ? 'YES' : 'NO';
+    if (typeof v === 'number') return Number.isInteger(v) ? String(v) : v.toFixed(3);
+    return String(v ?? '');
+  };
+
+  const ValueChips = ({ values }: { values: unknown[] }) => (
+    <div className="flex flex-wrap gap-1 mt-1">
+      {values.slice(0, 24).map((v, i) => (
+        <span key={i} className="text-[10px] font-mono px-1.5 py-0.5 rounded bg-[var(--bg-tertiary)]/70 border border-[var(--border-secondary)] text-[var(--text-secondary)] break-all">
+          {prettyValue(v)}
+        </span>
+      ))}
+      {values.length > 24 && (
+        <span className="text-[9px] font-mono text-[var(--text-muted)] px-1 py-0.5">+{values.length - 24} more</span>
+      )}
+    </div>
+  );
+
+  const ObjectCard = ({ value, index }: { value: Record<string, unknown>; index: number }) => {
+    const entries = Object.entries(value).filter(([, v]) => v !== null && v !== undefined && v !== '');
     return (
-      <div className="space-y-1">
-        {Object.entries(results).filter(([k]) => !['timestamp','cached'].includes(k)).map(([key, value]) => (
-          <ResultRow key={key} label={key.replace(/_/g, ' ')} value={typeof value === 'object' ? JSON.stringify(value, null, 1) : String(value)} />
+      <div className="rounded-lg border border-[var(--border-secondary)] bg-[var(--bg-tertiary)]/25 p-2">
+        {entries.slice(0, 10).map(([k, v]) => (
+          <div key={k} className="flex items-start gap-2 py-[3px] first:pt-0 last:pb-0">
+            <span className="text-[9px] font-mono uppercase tracking-wider text-[var(--text-muted)] w-[84px] flex-shrink-0 pt-[1px]">{prettyKey(k)}</span>
+            <span className="text-[10px] font-mono text-[var(--text-primary)] break-all flex-1">
+              {isPrimitive(v) ? prettyValue(v) : Array.isArray(v) ? v.slice(0, 6).map(prettyValue).join(' · ') : JSON.stringify(v)}
+            </span>
+          </div>
         ))}
+        {entries.length > 10 && (
+          <div className="text-[9px] font-mono text-[var(--text-muted)] pt-1">+{entries.length - 10} fields</div>
+        )}
+        {index < 0 && null}
       </div>
     );
+  };
+
+  const renderValue = (key: string, value: unknown) => {
+    if (value === null || value === undefined || value === '') return null;
+
+    if (Array.isArray(value)) {
+      if (!value.length) return null;
+      if (value.every(isPrimitive)) {
+        return (
+          <div key={key} className="py-1.5 border-b border-[var(--border-secondary)]/20 last:border-0">
+            <span className="text-[10px] font-mono text-[var(--text-muted)] uppercase tracking-wider">{prettyKey(key)}</span>
+            <ValueChips values={value} />
+          </div>
+        );
+      }
+      return (
+        <div key={key} className="mt-3">
+          <SectionHeader title={`${prettyKey(key).toUpperCase()} (${value.length})`} icon={Layers} color="var(--cyan-primary)" />
+          <div className="space-y-1">
+            {value.slice(0, 8).map((item, i) =>
+              item && typeof item === 'object' && !Array.isArray(item)
+                ? <ObjectCard key={i} value={item as Record<string, unknown>} index={i} />
+                : <div key={i} className="text-[10px] font-mono text-[var(--text-secondary)] break-all">{prettyValue(item)}</div>,
+            )}
+          </div>
+          {value.length > 8 && (
+            <div className="text-[9px] font-mono text-[var(--text-muted)] mt-1">+{value.length - 8} more not shown</div>
+          )}
+        </div>
+      );
+    }
+
+    if (typeof value === 'object') {
+      const entries = Object.entries(value as Record<string, unknown>).filter(([, v]) => v !== null && v !== undefined && v !== '');
+      if (!entries.length) return null;
+      return (
+        <div key={key} className="mt-3">
+          <SectionHeader title={prettyKey(key).toUpperCase()} icon={Layers} color="var(--cyan-primary)" />
+          {entries.map(([k, v]) => (
+            <ResultRow key={k} label={prettyKey(k)} value={isPrimitive(v) ? prettyValue(v) : Array.isArray(v) ? v.slice(0, 6).map(prettyValue).join(', ') : JSON.stringify(v)} />
+          ))}
+        </div>
+      );
+    }
+
+    return <ResultRow key={key} label={prettyKey(key)} value={prettyValue(value)} />;
+  };
+
+  const renderFallback = () => {
+    if (!results) return null;
+    const entries = Object.entries(results).filter(([k]) => !['timestamp', 'cached'].includes(k));
+    if (!entries.length) {
+      return (
+        <div className="flex items-center gap-2 py-3 text-[10px] font-mono text-[var(--text-muted)]">
+          <Shield className="w-3.5 h-3.5" /> The module answered, but with no fields to show.
+        </div>
+      );
+    }
+    return <div className="space-y-0.5">{entries.map(([key, value]) => renderValue(key, value))}</div>;
   };
 
   const renderFallbackExcluding = (exclude: string[]) => {
@@ -1051,10 +1225,9 @@ function OsintPanelInner({ isMobile, onSweepVisualize, onScanGeolocate }: OsintP
     const extra = Object.entries(results).filter(([k]) => !exclude.includes(k));
     if (extra.length === 0) return null;
     return (
-      <div className="mt-2 space-y-1">
-        {extra.map(([key, value]) => (
-          <ResultRow key={key} label={key.replace(/_/g, ' ')} value={typeof value === 'object' ? JSON.stringify(value, null, 1) : String(value)} />
-        ))}
+      <div className="mt-2 space-y-0.5">
+        <SectionHeader title="ADDITIONAL FIELDS" icon={Layers} color="var(--text-muted)" />
+        {extra.map(([key, value]) => renderValue(key, value))}
       </div>
     );
   };
@@ -1264,12 +1437,85 @@ function OsintPanelInner({ isMobile, onSweepVisualize, onScanGeolocate }: OsintP
               className="w-full bg-[var(--bg-primary)]/60 border border-[var(--border-primary)] rounded-lg pl-8 pr-3 py-2.5 text-[10px] font-mono text-[var(--text-primary)] placeholder:text-[var(--text-muted)]/40 focus:outline-none transition-colors"
               style={{ borderColor: query ? `${currentTab?.color}40` : undefined }} />
           </div>
-          <button onClick={runLookup} disabled={loading || !query.trim()}
+          <button onClick={() => runLookup()} disabled={loading || (!query.trim() && !queue.length)}
             className="px-4 py-2 rounded-lg text-[11px] font-mono font-bold tracking-wider disabled:opacity-30 transition-all flex items-center justify-center min-w-[70px]"
             style={{ backgroundColor: `${currentTab?.color}20`, border: `1px solid ${currentTab?.color}40`, color: currentTab?.color }}>
             {loading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : 'SCAN'}
           </button>
+          <button
+            onClick={enqueue}
+            disabled={!query.trim() || isQueued}
+            title={isQueued ? 'Already in the batch' : 'Add this tool and target to the batch'}
+            aria-label="Add to batch"
+            className="px-2.5 py-2 rounded-lg font-mono text-[12px] disabled:opacity-25 transition-all flex items-center justify-center border border-[var(--border-primary)] text-[var(--text-secondary)] hover:text-[var(--text-primary)] hover:border-[var(--border-active)]"
+          >
+            {isQueued ? <CheckCircle className="w-3.5 h-3.5 text-[var(--alert-green)]" /> : '+'}
+          </button>
         </div>
+        )}
+
+        {/* What the box wants, then what the batch holds. */}
+        {queueHint && (
+          <div className="flex items-center gap-1.5 text-[9px] font-mono text-[var(--alert-orange)]/90 pl-0.5">
+            <AlertTriangle className="w-3 h-3 flex-shrink-0" />
+            {queueHint}
+          </div>
+        )}
+
+        {queue.length > 0 && (
+          <div className="rounded-lg border border-[var(--border-primary)] bg-[var(--bg-primary)]/40 p-2">
+            <div className="flex items-center justify-between mb-1.5">
+              <span className="text-[9px] font-mono tracking-[0.18em] text-[var(--text-muted)]">
+                BATCH · {queue.length} SCAN{queue.length === 1 ? '' : 'S'}
+                {queueTargets.size < queue.length && (
+                  <span className="text-[var(--alert-orange)]"> · {queueTargets.size} TARGET{queueTargets.size === 1 ? '' : 'S'}</span>
+                )}
+              </span>
+              <div className="flex items-center gap-1">
+                <button
+                  onClick={() => setQueue([])}
+                  className="px-1.5 py-0.5 rounded text-[9px] font-mono text-[var(--text-muted)] hover:text-[var(--text-primary)] transition-colors"
+                >
+                  CLEAR
+                </button>
+                <button
+                  onClick={() => void runQueue()}
+                  disabled={loading}
+                  className="px-2 py-0.5 rounded text-[9px] font-mono font-bold tracking-wider disabled:opacity-30 transition-colors"
+                  style={{ background: `${currentTab?.color}20`, color: currentTab?.color, border: `1px solid ${currentTab?.color}40` }}
+                >
+                  RUN ALL
+                </button>
+              </div>
+            </div>
+            <div className="flex flex-col gap-1 max-h-[120px] overflow-y-auto styled-scrollbar">
+              {queue.map(item => {
+                const def = TABS.find(t => t.id === item.tab);
+                const overlapping = queue.filter(other => other.query === item.query).length > 1;
+                return (
+                  <div key={item.id} className="flex items-center gap-2 px-1 py-0.5 rounded hover:bg-[var(--hover-accent)] transition-colors">
+                    <span className="w-1 h-1 rounded-full shrink-0" style={{ background: def?.color || 'var(--text-muted)' }} />
+                    <span className="text-[9px] font-mono tracking-wide shrink-0" style={{ color: def?.color || 'var(--text-muted)' }}>
+                      {def?.label || item.tab}
+                    </span>
+                    <span className="text-[10px] font-mono text-[var(--text-secondary)] truncate flex-1">{item.query}</span>
+                    {overlapping && (
+                      <span className="text-[8px] font-mono text-[var(--alert-orange)]/80 shrink-0" title="Another queued tool targets the same address — expect overlapping results">
+                        SAME TARGET
+                      </span>
+                    )}
+                    <button
+                      onClick={() => setQueue(prev => prev.filter(q => q.id !== item.id))}
+                      className="text-[var(--text-muted)] hover:text-[var(--alert-red)] transition-colors shrink-0"
+                      aria-label={`Remove ${item.query}`}
+                    >
+                      <XCircle className="w-3 h-3" />
+                    </button>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
         )}
 
         {/* Secondary Controls */}

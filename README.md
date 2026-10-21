@@ -52,6 +52,49 @@ One segmented control switches projection and basemap independently, so any comb
   with the `live-earch-` scanner build.
 - **Routing and search** — turn-by-turn directions and place/coordinate search.
 
+### Arrival: the address you came from
+
+A visitor is not greeted with a login screen or a random city. On load the platform asks which
+public address is reaching it, and flies there:
+
+1. **Resolve** — server-side `/api/ip` first (it sees the real client address), then the
+   registry providers from the browser if the route or the network cannot answer.
+2. **Descend** — four chained flights, not one. The globe turns under a flat, wide curve first,
+   then the pitch climbs and the zoom falls until the city is legible at roughly street-free
+   scale. The whole descent takes about eight seconds and any touch or keystroke on the map
+   hands the camera back immediately.
+3. **Explain** — a dossier opens on arrival naming the address, city, ISP, ASN, timezone, local
+   time, reverse DNS and the honest confidence of the match.
+
+The wording is deliberate: *detected access origin*, not *your location*. An IP record is an
+allocation, not a device — city-level at best, sometimes a carrier gateway three cities away —
+so every dossier carries a confidence ring, a precision label (city / region / country) and a
+warning when the address is hosting, mobile or proxied. Nothing claims to know a street.
+
+### Search that moves the Earth
+
+The command bar accepts place names, coordinates, **IP addresses and domains**. An IP or a
+domain is not sent to a geocoder — it is resolved (DNS over HTTPS), geolocated, and then the
+camera travels there: a long low arc across the planet, followed by a dive and a pin. The
+header counts the kilometres down while it flies. Turning up somewhere else is a journey, not
+a page load.
+
+Domains carry an extra honesty note: a CDN edge node is where the *host* is, not where the
+company is, and the confidence is lowered accordingly.
+
+### Recon console: a batch, not a memory test
+
+The toolkit (nineteen modules across network, domain, identity, threat and chain) now:
+
+- states **what each module expects** — an IP scanner says so before you send it a domain;
+- keeps a **batch queue** of tool × target pairs, so eight queued scans read as eight visible
+  lines rather than eight clicks you have to remember, with a `SAME TARGET` flag when several
+  tools will return overlapping results;
+- runs the batch sequentially with `RUN ALL`;
+- renders every result as structure — labelled rows, chips for short lists, cards for records,
+  sections for nested objects — instead of a JSON dump. Arrays say how many entries they are
+  holding back rather than pretending to be complete.
+
 ### What was removed in this pass
 
 | Removed | Where it lived |

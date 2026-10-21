@@ -38,8 +38,31 @@ interface OsirisMapProps {
   onRightClick?: (coords: { lat: number; lng: number }) => void;
   onViewStateChange?: (vs: { zoom: number; latitude: number }) => void;
   /** `alertId` also opens that Live Alert's pin once the camera arrives.
-   *  `duration` overrides the default 2 s flight. */
-  flyToLocation?: { lat: number; lng: number; zoom?: number; alertId?: string; duration?: number; ts: number } | null;
+   *  `duration` overrides the default 2 s flight. `pitch`, `bearing` and
+   *  `curve` are what turn a jump into an approach: a long low-curve hop over
+   *  the planet reads as travel, a straight line reads as a page change. */
+  flyToLocation?: {
+    lat: number;
+    lng: number;
+    zoom?: number;
+    alertId?: string;
+    duration?: number;
+    pitch?: number;
+    bearing?: number;
+    curve?: number;
+    /** Without this MapLibre cuts the flight short on the first user gesture. */
+    essential?: boolean;
+    ts: number;
+  } | null;
+  /** The address a lookup resolved to: a pin that survives style changes. */
+  geoPin?: {
+    lat: number;
+    lng: number;
+    label: string;
+    sub?: string;
+    tone?: 'origin' | 'target';
+    ts: number;
+  } | null;
   /** Fires once, when the map has drawn its first complete frame. */
   onReady?: () => void;
   /** Which Live Alerts to pin — the reports the feed is showing. Null pins them all. */
@@ -165,7 +188,7 @@ interface AlertPinFeature {
   properties: AlertPinProps;
 }
 
-function OsirisMap({ data, activeLayers, onEntityClick, onMouseCoords, onRightClick, onViewStateChange, onReady, flyToLocation, alertPinIds = null, projection = 'globe', terrainEnabled = false, terrainRetry = 0, terrainFocus = 0, onTerrainStatusChange, mapStyle = 'dark', sweepData, scanTargets = [], demoMode = false, theme = 'core', drawnPolygons = [], arcgisLayers = [], drawMode = null, onDrawComplete, onDrawProgress, onDrawCancel, drawCommand = null, onMapCenter, route = null, userLocation = null, followUser = false, onFollowInterrupt, navigating = false, aircraftAirports = {} }: OsirisMapProps) {
+function OsirisMap({ data, activeLayers, onEntityClick, onMouseCoords, onRightClick, onViewStateChange, onReady, flyToLocation, geoPin = null, alertPinIds = null, projection = 'globe', terrainEnabled = false, terrainRetry = 0, terrainFocus = 0, onTerrainStatusChange, mapStyle = 'dark', sweepData, scanTargets = [], demoMode = false, theme = 'core', drawnPolygons = [], arcgisLayers = [], drawMode = null, onDrawComplete, onDrawProgress, onDrawCancel, drawCommand = null, onMapCenter, route = null, userLocation = null, followUser = false, onFollowInterrupt, navigating = false, aircraftAirports = {} }: OsirisMapProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const popupRef = useRef<maplibregl.Popup | null>(null);
@@ -2551,13 +2574,71 @@ function OsirisMap({ data, activeLayers, onEntityClick, onMouseCoords, onRightCl
   useEffect(() => {
     if (!mapReady || !mapRef.current || !flyToLocation) return;
     const map = mapRef.current;
-    map.flyTo({ center: [flyToLocation.lng, flyToLocation.lat], zoom: flyToLocation.zoom ?? 8, duration: flyToLocation.duration ?? 2000 });
+    map.flyTo({
+      center: [flyToLocation.lng, flyToLocation.lat],
+      zoom: flyToLocation.zoom ?? 8,
+      duration: flyToLocation.duration ?? 2000,
+      /* Only sent when asked for: MapLibre treats a pitch of 0 as "keep the
+         current tilt", so passing one always would silently flatten a dive. */
+      ...(flyToLocation.pitch !== undefined ? { pitch: flyToLocation.pitch } : {}),
+      ...(flyToLocation.bearing !== undefined ? { bearing: flyToLocation.bearing } : {}),
+      ...(flyToLocation.curve !== undefined ? { curve: flyToLocation.curve } : {}),
+      essential: flyToLocation.essential ?? false,
+    });
     const alertId = flyToLocation.alertId;
     if (!alertId) return;
     const open = () => openAlertPinRef.current?.(alertId);
     map.once('moveend', open);
     return () => { map.off('moveend', open); };
   }, [mapReady, flyToLocation]);
+
+  /* ── Geolocation pin ──────────────────────────────────────────
+     A DOM marker rather than a style layer: it must survive a basemap swap
+     (NIGHT ↔ SAT rebuilds every layer), carry its own label, and pulse
+     without a paint-property animation frame budget. The rings are drawn in
+     CSS, so a pinned address costs the map nothing per frame. */
+  useEffect(() => {
+    if (!mapReady || !mapRef.current) return;
+    const map = mapRef.current;
+
+    if (!document.getElementById('argus-geopin-css')) {
+      const style = document.createElement('style');
+      style.id = 'argus-geopin-css';
+      style.textContent = `
+        @keyframes argusPinPulse {
+          0%   { transform: translate(-50%, -50%) scale(0.35); opacity: 0.9; }
+          70%  { transform: translate(-50%, -50%) scale(1.6);  opacity: 0;   }
+          100% { transform: translate(-50%, -50%) scale(1.6);  opacity: 0;   }
+        }
+        @keyframes argusPinDrop {
+          0%   { transform: translateY(-14px) scale(0.6); opacity: 0; }
+          100% { transform: translateY(0) scale(1); opacity: 1; }
+        }
+      `;
+      document.head.appendChild(style);
+    }
+
+    if (!geoPin) return;
+
+    const tone = geoPin.tone === 'origin' ? '#00E5FF' : '#D4AF37';
+    const el = document.createElement('div');
+    el.style.cssText = 'position:relative;width:0;height:0;pointer-events:none;';
+    el.innerHTML = `
+      <div style="position:absolute;left:0;top:0;transform:translate(-50%,-50%);width:64px;height:64px;border-radius:999px;border:1px solid ${tone};animation:argusPinPulse 2.6s cubic-bezier(0.22,0.61,0.36,1) infinite;"></div>
+      <div style="position:absolute;left:0;top:0;transform:translate(-50%,-50%);width:64px;height:64px;border-radius:999px;border:1px solid ${tone};animation:argusPinPulse 2.6s cubic-bezier(0.22,0.61,0.36,1) infinite;animation-delay:1.3s;"></div>
+      <div style="position:absolute;left:0;top:0;transform:translate(-50%,-50%);width:12px;height:12px;border-radius:999px;background:${tone};box-shadow:0 0 10px ${tone},0 0 26px ${tone}66;border:2px solid rgba(255,255,255,0.85);"></div>
+      <div style="position:absolute;left:0;bottom:10px;transform:translateX(-50%);display:flex;flex-direction:column;align-items:center;gap:3px;animation:argusPinDrop 0.5s cubic-bezier(0.16,1,0.3,1) both;">
+        <div style="white-space:nowrap;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:9.5px;letter-spacing:0.14em;color:#fff;background:rgba(6,6,14,0.92);border:1px solid ${tone}55;border-radius:4px;padding:3px 7px;backdrop-filter:blur(6px);box-shadow:0 4px 18px rgba(0,0,0,0.55);">${geoPin.label}</div>
+        ${geoPin.sub ? `<div style="white-space:nowrap;font-family:'JetBrains Mono',ui-monospace,monospace;font-size:8px;letter-spacing:0.12em;color:${tone};opacity:0.9;">${geoPin.sub}</div>` : ''}
+      </div>
+    `;
+
+    const marker = new maplibregl.Marker({ element: el, anchor: 'center' })
+      .setLngLat([geoPin.lng, geoPin.lat])
+      .addTo(map);
+
+    return () => { marker.remove(); };
+  }, [mapReady, geoPin]);
 
   // 3D buildings are independent of the elevation renderer.
   useEffect(() => {
